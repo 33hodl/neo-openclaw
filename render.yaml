@@ -2,7 +2,7 @@ services:
   - type: web
     name: openclaw
     runtime: docker
-    plan: standard
+    plan: free
     healthCheckPath: /health
     envVars:
       - key: PORT
