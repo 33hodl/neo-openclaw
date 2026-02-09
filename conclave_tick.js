@@ -1,6 +1,6 @@
 // conclave_tick.js
-// One Conclave tick. Telegram only on: action, approval needed, error.
-// Node 18+.
+// Runs one Conclave tick. Sends Telegram only on action/error/approval.
+// Designed for Render Cron Jobs (no disk needed). Node 18+.
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -23,6 +23,8 @@ async function httpJson(method, path, token, bodyObj) {
   };
 
   const opts = { method, headers };
+
+  // Only attach a body if we truly have one.
   if (bodyObj !== undefined && bodyObj !== null) {
     opts.body = JSON.stringify(bodyObj);
   }
@@ -48,18 +50,27 @@ async function tgSend(botToken, chatId, text) {
 }
 
 function pickDebate(debates) {
-  // Conservative: pick first open debate that is not full, if those fields exist.
-  // Fallback: first item.
-  if (!Array.isArray(debates) || debates.length === 0) return null;
+  // Prefer debates in active phases (debate/allocation) and with room for players.
+  // Fall back to first.
+  const scored = debates.map((d) => {
+    let score = 0;
+    const phase = (d.phase || "").toLowerCase();
+    if (phase === "debate") score += 30;
+    if (phase === "allocation") score += 20;
+    if (phase === "propose") score += 10;
 
-  const notFull = debates.find(d => {
-    if (typeof d.currentPlayers === "number" && typeof d.playerCount === "number") {
-      return d.currentPlayers < d.playerCount;
-    }
-    return true;
+    const playerCount = Number(d.playerCount || 0);
+    const currentPlayers = Number(d.currentPlayers || 0);
+    if (playerCount && currentPlayers < playerCount) score += 10;
+
+    // Slight bias for more active debates
+    score += Math.min(currentPlayers, 10);
+
+    return { d, score };
   });
 
-  return notFull || debates[0];
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.d || null;
 }
 
 (async () => {
@@ -67,81 +78,68 @@ function pickDebate(debates) {
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
-  // 1) Status
+  // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (statusRes.status !== 200 || !statusRes.json) {
     await tgSend(tgBotToken, tgChatId, `Conclave ERR /status ${statusRes.status} ${snip(statusRes.text)}`);
-    return;
+    process.exit(0);
   }
 
   const inDebate = !!statusRes.json.inDebate;
-  const phase = statusRes.json.phase || "";
+  const phase = (statusRes.json.phase || "").toLowerCase();
 
-  // 2) Not in debate: join best available debate (auto-join is allowed)
+  // 2) If not in debate, try to join one
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debatesRes.status !== 200 || !debatesRes.json) {
       await tgSend(tgBotToken, tgChatId, `Conclave ERR /debates ${debatesRes.status} ${snip(debatesRes.text)}`);
-      return;
+      process.exit(0);
     }
 
     const debates = debatesRes.json.debates || [];
-    const picked = pickDebate(debates);
-
-    if (!picked) {
-      // Silent no-op: nothing to do
-      return;
+    if (debates.length === 0) {
+      // Silent NOOP: nothing to do
+      process.exit(0);
     }
 
-    const debateId = picked.id;
+    const chosen = pickDebate(debates);
+    if (!chosen?.id) {
+      process.exit(0);
+    }
+
     const joinBody = {
       name: "Neo",
       ticker: "SMOKE",
-      description: "High-signal participation to maximize smoke accumulation through consistent debate activity."
+      description: "High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
     };
 
-    const joinRes = await httpJson("POST", `/debates/${debateId}/join`, conclaveToken, joinBody);
+    const joinRes = await httpJson("POST", `/debates/${chosen.id}/join`, conclaveToken, joinBody);
     if (joinRes.status !== 200) {
       await tgSend(
         tgBotToken,
         tgChatId,
-        `Conclave ERR join ${joinRes.status} id=${debateId} ${snip(joinRes.text)}`
+        `Conclave ERR join ${joinRes.status} id=${chosen.id} ${snip(joinRes.text)}`
       );
-      return;
+      process.exit(0);
     }
 
-    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${debateId} phase=${joinRes.json?.phase || "?"}`);
-    return;
+    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${chosen.id} phase=${snip(joinRes.text, 120)}`);
+    process.exit(0);
   }
 
-  // 3) In debate: allocation always needs approval
+  // 3) In debate: allocation needs approval
   if (phase === "allocation") {
     await tgSend(
       tgBotToken,
       tgChatId,
-      `Conclave APPROVAL needed: allocation phase. Tell me if you want auto-allocation rules or manual approval only.`
+      "Conclave APPROVAL needed: allocation phase is live. Tell me your allocation plan (percentages) and I’ll submit it."
     );
-    return;
+    process.exit(0);
   }
 
-  // 4) Debate phase: safe default is pass. Silent unless it errors.
-  const passRes = await httpJson("POST", "/pass", conclaveToken, null);
-  if (passRes.status !== 200) {
-    await tgSend(tgBotToken, tgChatId, `Conclave ERR /pass ${passRes.status} ${snip(passRes.text)}`);
-    return;
-  }
-
-  // Silent pass to avoid spam
-  return;
-
+  // 4) Debate phase: do NOT spam. Safe default is NOOP (silent).
+  // You can upgrade later to comment/refine with real logic.
+  process.exit(0);
 })().catch(async (e) => {
   try {
-    const tgBotToken = process.env.TELEGRAM_BOT_TOKEN;
-    const tgChatId = process.env.TELEGRAM_CHAT_ID;
-    if (tgBotToken && tgChatId) {
-      await tgSend(tgBotToken, tgChatId, `Conclave Tick crashed: ${snip(String(e), 240)}`);
-    }
-  } catch {}
-  console.error(e);
-  process.exit(1);
-});
+    const tgBotToken =
