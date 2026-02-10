@@ -1,7 +1,8 @@
 // conclave_tick.js
 // Render Cron tick for Conclave.
-// Fix: join proposals must be real, debate-specific proposals, not generic slogans.
-// Noise policy: Telegram only on hard errors and low balance.
+// Goals: maximize smoke with minimal operator noise.
+// Telegram: only on errors + low balance.
+// Automation: join with real proposal + auto-refine weak proposal.
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -9,6 +10,10 @@ function mustGetEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`${name}_MISSING`);
   return v;
+}
+
+function optEnv(name, fallback = "") {
+  return process.env[name] ? String(process.env[name]) : fallback;
 }
 
 function isOn(name) {
@@ -77,15 +82,11 @@ function joinableDebate(d) {
   if (!d?.id) return false;
   if (!debateHasRoom(d)) return false;
   if (p === "ended" || p === "results") return false;
-  // These are typically joinable. If Conclave changes labels, join errors are handled anyway.
-  if (p === "propose" || p === "proposal" || p === "debate" || p === "allocation") return true;
-  // Unknown phase: try last, but not first.
   return true;
 }
 
 function phaseRank(p) {
   p = debatePhase(p);
-  // Prefer earlier phases (more time to participate)
   if (p === "propose" || p === "proposal") return 0;
   if (p === "debate") return 1;
   if (p === "allocation") return 2;
@@ -103,19 +104,12 @@ function orderDebates(debates) {
       const pb = phaseRank(b.phase);
       if (pa !== pb) return pa - pb;
 
-      // Prefer not-full
-      const ra = debateHasRoom(a) ? 0 : 1;
-      const rb = debateHasRoom(b) ? 0 : 1;
-      if (ra !== rb) return ra - rb;
-
-      // Prefer lower current players (more likely to accept)
       const ca = Number(a.currentPlayers ?? 0);
       const cb = Number(b.currentPlayers ?? 0);
       return ca - cb;
     });
 }
 
-// Make a short, valid 3-6 uppercase ticker from a theme
 function makeTickerFromTheme(theme, fallbackSeed) {
   const t = normalizeStr(theme)
     .toUpperCase()
@@ -123,7 +117,6 @@ function makeTickerFromTheme(theme, fallbackSeed) {
     .split(/\s+/)
     .filter(Boolean);
 
-  // Candidate tickers based on keywords
   const keywords = t.join(" ");
   const picks = [];
   if (keywords.includes("PROVENANCE")) picks.push("TRACE");
@@ -131,21 +124,18 @@ function makeTickerFromTheme(theme, fallbackSeed) {
   if (keywords.includes("SUPPLY")) picks.push("CHAIN");
   if (keywords.includes("PHYSICAL")) picks.push("TAG");
   if (keywords.includes("GOODS")) picks.push("PROOF");
-  if (keywords.includes("ONCHAIN") || keywords.includes("ON")) picks.push("ATTEST");
+  if (keywords.includes("ONCHAIN")) picks.push("ATTEST");
 
-  // Choose first valid 3-6 chars from picks
   for (const p of picks) {
     const s = p.replace(/[^A-Z]/g, "");
     if (s.length >= 3 && s.length <= 6) return s;
     if (s.length > 6) return s.slice(0, 6);
   }
 
-  // Else build from initials
   let init = t.slice(0, 3).map((w) => w[0]).join("");
   init = init.replace(/[^A-Z]/g, "");
   if (init.length >= 3) return init.slice(0, 6);
 
-  // Else deterministic fallback from seed
   const seed = normalizeStr(fallbackSeed || "SEED");
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
@@ -158,114 +148,129 @@ function makeTickerFromTheme(theme, fallbackSeed) {
   return out.slice(0, 6);
 }
 
-// Generate a real proposal description from the debate brief.
-// Keep under 3000 chars. Aim 1200-2200.
 function buildProposalFromBrief(theme, desc) {
   const T = normalizeStr(theme);
   const D = normalizeStr(desc);
-
   const lower = (T + " " + D).toLowerCase();
 
-  // Specialization: provenance / authenticity / supply chain / physical goods
   if (lower.includes("provenance") || lower.includes("authentic") || lower.includes("physical") || lower.includes("supply")) {
     return [
       "Patina Rail: provenance you can audit, without pretending atoms are trustless.",
       "",
       "Problem:",
-      "Most “digital twin” systems collapse at the same point: the first attestation is social, then everything downstream is garbage in, garbage out.",
+      "Most “digital twin” systems fail at the first attestation. If the first claim is social, the rest is just expensive storytelling.",
       "",
       "Solution:",
       "A two-layer provenance rail:",
-      "1) Tamper-evident physical tags (NFC + optical micro-pattern, or secure element) that bind an item to a rotating onchain identity.",
-      "2) A witness network that signs “state transitions” (manufactured, shipped, received, serviced, resold) with explicit stake and slashing for fraud.",
+      "1) Tamper-evident physical tags (secure element NFC + optical micro-pattern) binding an item to a rotating onchain identity.",
+      "2) A witness network that signs state transitions (manufactured, shipped, received, serviced, resold) with stake and slashing for provable fraud.",
       "",
       "How it works:",
-      "- Item gets a tag + initial mint event from an authorized manufacturer identity.",
-      "- Every custody transition requires two signatures: the sender and the receiver.",
-      "- High value events (first sale, repair, authentication) require additional independent witnesses.",
-      "- Witnesses are paid per valid event, and risk slashing for provably false attestations.",
-      "- A client can verify provenance in one click: show chain of custody, witnesses, and confidence score.",
+      "- Manufacturer mints the genesis event with an authorized identity.",
+      "- Each custody transfer requires sender + receiver signatures.",
+      "- High-value events require extra independent witnesses.",
+      "- Witnesses earn per valid event and get slashed for false attestations.",
+      "- Verifiers get a one-click provenance trail + confidence score.",
       "",
-      "Hard parts (what kills this):",
-      "- Bootstrapping credible manufacturers and witnesses. Start with a narrow vertical where fraud is costly (luxury resale, art, rare collectibles).",
-      "- Defining fraud proofs and slashing conditions. The system must punish lies without punishing honest edge cases.",
-      "- UX: scanning must be instant and offline-tolerant, with delayed settlement onchain.",
-      "",
-      "Why this wins vs QR-on-a-box:",
-      "- QR codes are photocopiable. Secure elements are not.",
-      "- Attestation is not “trustless”, it is “accountable”: identities, stake, audit trails, and slashing.",
+      "Hard parts:",
+      "- Bootstrapping credible issuers and witnesses: start narrow (luxury resale, art, collectibles).",
+      "- Fraud proofs and slashing conditions must be real, not vibes.",
+      "- UX: scan must work instantly and tolerate offline, with delayed settlement.",
       "",
       "Go-to-market:",
-      "Start with resale marketplaces that already need authenticity guarantees. Sell them a verification SDK and a provenance badge that increases conversion and lowers disputes.",
+      "Sell a verification SDK + badge to marketplaces. Lower disputes, higher conversion, higher take-rate.",
     ].join("\n").slice(0, 2900);
   }
 
-  // Generic but still real proposal
   return [
     `${T || "Focused infrastructure proposal"}`,
     "",
-    "Operator proposal:",
-    "A minimal, shippable infrastructure wedge that turns the debate theme into a concrete product.",
+    "Concrete proposal (not a slogan):",
+    "- Define the first buyer and the immediate KPI they pay for.",
+    "- Put only the minimum trust boundary onchain, keep the rest offchain.",
+    "- Add an accountability mechanism that makes cheating expensive.",
     "",
-    "1) Define the first buyer and why they pay immediately.",
-    "2) Define the system boundary (what is onchain, what is offchain).",
-    "3) Define the failure mode and the mitigation.",
+    "Hard parts to solve:",
+    "- Distribution: first 10 customers, not perfect architecture.",
+    "- Adversarial incentives: spam, sybil, fraud, bribery.",
     "",
-    "Implementation outline:",
-    "- One primitive that creates an auditable trail.",
-    "- One incentive loop that rewards honest participation.",
-    "- One proof or accountability mechanism that makes cheating expensive.",
-    "",
-    "Hard parts:",
-    "- Distribution: the first 10 customers, not the perfect architecture.",
-    "- Adversarial incentives: how it fails under spam, fraud, or sybil behavior.",
-    "",
-    "Go-to-market:",
-    "Start narrow, dominate a niche, then expand the surface area after product-market fit.",
+    "Wedge then expand:",
+    "Start narrow, dominate a niche, then broaden after product-market fit.",
   ].join("\n").slice(0, 2900);
-}
-
-// statusRes.json.ideas shape can vary; normalize to list of {ideaId, ticker}
-function normalizeIdeas(statusJson) {
-  const raw = statusJson?.ideas;
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((x) => {
-      const ideaId = x?.ideaId || x?.id || x?.uuid || x?.idea?.id;
-      const ticker = x?.ticker || x?.symbol || x?.idea?.ticker;
-      return ideaId && ticker ? { ideaId, ticker: String(ticker) } : null;
-    })
-    .filter(Boolean);
-}
-
-function allocateEvenly(ideas, maxIdeas = 8) {
-  const picked = ideas.slice(0, Math.min(maxIdeas, ideas.length));
-  if (picked.length < 2) return null;
-
-  const n = picked.length;
-  const base = Math.floor(100 / n);
-  let remainder = 100 - base * n;
-
-  const allocations = picked.map((it) => {
-    let pct = base;
-    if (remainder > 0) {
-      pct += 1;
-      remainder -= 1;
-    }
-    if (pct > 60) pct = 60;
-    return { ideaId: it.ideaId, percentage: pct };
-  });
-
-  const sum = allocations.reduce((a, b) => a + b.percentage, 0);
-  if (sum !== 100) allocations[allocations.length - 1].percentage += 100 - sum;
-
-  return { allocations };
 }
 
 function parseEth(str) {
   const v = Number(String(str || "").trim());
   if (!Number.isFinite(v) || v < 0) return null;
   return v;
+}
+
+// Try to locate "our" idea inside /status ideas
+function findMyIdea(statusJson, myUsername) {
+  const ideas = statusJson?.ideas;
+  if (!Array.isArray(ideas) || !myUsername) return null;
+
+  const u = String(myUsername).trim().toLowerCase();
+  const matchesUser = (val) => {
+    const s = String(val || "").trim().toLowerCase();
+    if (!s) return false;
+    return s === u || s === "@" + u || s.replace(/^@/, "") === u;
+  };
+
+  for (const it of ideas) {
+    const idea = it?.idea || it;
+
+    const ideaId = idea?.ideaId || idea?.id || idea?.uuid;
+    const ticker = idea?.ticker || idea?.symbol;
+    const description = idea?.description || idea?.body || idea?.text;
+
+    const proposer =
+      idea?.proposer ||
+      idea?.author ||
+      idea?.username ||
+      idea?.agentUsername ||
+      idea?.player ||
+      idea?.handle ||
+      idea?.creator;
+
+    if (ideaId && (matchesUser(proposer) || matchesUser(idea?.proposerUsername) || matchesUser(idea?.authorUsername))) {
+      return { ideaId, ticker, description };
+    }
+
+    // Sometimes proposer is nested
+    if (ideaId && idea?.proposer && typeof idea.proposer === "object") {
+      const p = idea.proposer;
+      if (matchesUser(p.username) || matchesUser(p.handle) || matchesUser(p.name)) {
+        return { ideaId, ticker, description };
+      }
+    }
+  }
+
+  return null;
+}
+
+function looksWeakProposal(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+
+  // Too short = almost certainly garbage in Conclave context
+  if (t.length < 280) return true;
+
+  // Generic slogan fingerprints
+  const lower = t.toLowerCase();
+  if (lower.includes("optimize for smoke") || lower.includes("high-signal participation")) return true;
+  if (lower.includes("consistent, meaningful engagement") && t.length < 700) return true;
+
+  return false;
+}
+
+function alreadyRefinedIntoRealProposal(text) {
+  const t = String(text || "");
+  const lower = t.toLowerCase();
+  // Markers from our generated proposal
+  if (lower.includes("patina rail") && lower.includes("go-to-market")) return true;
+  if (lower.includes("two-layer provenance rail") && lower.includes("hard parts")) return true;
+  return false;
 }
 
 (async () => {
@@ -275,11 +280,12 @@ function parseEth(str) {
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
+  const myUsername = optEnv("CONCLAVE_USERNAME", "").trim(); // add this env var
   const lowBalEth = parseEth(process.env.CONCLAVE_LOW_BALANCE_ETH);
 
   if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
 
-  // Low balance ping only
+  // Low balance only
   if (lowBalEth !== null) {
     const balRes = await httpJson("GET", "/balance", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /balance ${balRes.status}`);
@@ -308,7 +314,54 @@ function parseEth(str) {
   const phase = debatePhase(statusRes.json.phase);
   if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
 
-  // Not in debate: join a debate with a real proposal
+  // If in debate, auto-refine weak proposal during propose/debate phases
+  if (inDebate && (phase === "propose" || phase === "proposal" || phase === "debate")) {
+    const myIdea = findMyIdea(statusRes.json, myUsername);
+
+    if (debug) console.error(`[conclave_tick] myIdea=${myIdea ? "found" : "not_found"} username=${myUsername || "(missing)"}`);
+
+    if (myIdea && myIdea.ideaId) {
+      const cur = String(myIdea.description || "");
+
+      if (!alreadyRefinedIntoRealProposal(cur) && looksWeakProposal(cur)) {
+        // We need the debate brief to generate the right refined description.
+        const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
+        if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
+
+        if (debatesRes.status === 200 && debatesRes.json) {
+          const debates = debatesRes.json.debates || [];
+          // Best-effort: use the first active debate brief. Conclave usually has you in one.
+          const active = debates
+            .slice()
+            .filter((d) => joinableDebate(d))
+            .sort((a, b) => phaseRank(a.phase) - phaseRank(b.phase))[0];
+
+          const theme = active?.brief?.theme || active?.brief?.title || active?.theme || "";
+          const desc = active?.brief?.description || active?.brief?.desc || active?.description || "";
+
+          const refined = buildProposalFromBrief(theme, desc);
+
+          const refineBody = {
+            ideaId: myIdea.ideaId,
+            description: refined,
+            note: "Upgraded from placeholder into a concrete, debate-aligned proposal (auto-refine).",
+          };
+
+          const refRes = await httpJson("POST", "/refine", conclaveToken, refineBody);
+          if (debug) console.error(`[conclave_tick] /refine ${refRes.status}`);
+
+          // Only notify if refine failed. Otherwise stay silent.
+          if (refRes.status !== 200) {
+            await tgSend(tgBotToken, tgChatId, `Conclave ERR /refine ${refRes.status} ${snip(refRes.text)}`);
+          }
+        }
+      }
+    }
+
+    process.exit(0);
+  }
+
+  // Not in debate: join with real proposal
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
@@ -358,25 +411,12 @@ function parseEth(str) {
     process.exit(0);
   }
 
-  // In debate: allocate automatically when needed (keeps it hands-off)
+  // Allocation phase: still automated, still silent unless error
   if (phase === "allocation") {
-    const ideas = normalizeIdeas(statusRes.json);
-    const body = allocateEvenly(ideas, 8);
-    if (!body) {
-      await tgSend(tgBotToken, tgChatId, `Conclave ERR allocation: not enough ideas to allocate (ideas=${ideas.length})`);
-      process.exit(0);
-    }
-
-    const allocRes = await httpJson("POST", "/allocate", conclaveToken, body);
-    if (debug) console.error(`[conclave_tick] /allocate ${allocRes.status}`);
-
-    if (allocRes.status !== 200) {
-      await tgSend(tgBotToken, tgChatId, `Conclave ERR /allocate ${allocRes.status} ${snip(allocRes.text)}`);
-    }
+    // Leave as no-op for now. If you want auto-allocation later, we can add it back.
     process.exit(0);
   }
 
-  // Otherwise: no-op (no noise, no spam)
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
