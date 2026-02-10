@@ -1,5 +1,5 @@
 # Global ARG for use in FROM instructions
-ARG OPENCLAW_VERSION=2026.2.2
+ARG OPENCLAW_VERSION=2026.2.9
 
 # Build Go proxy
 FROM golang:1.22-bookworm AS proxy-builder
