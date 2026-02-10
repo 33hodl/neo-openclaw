@@ -59,28 +59,36 @@ function safeErrMsg(joinRes) {
 function debateHasRoom(d) {
   const playerCount = Number(d.playerCount ?? 0);
   const currentPlayers = Number(d.currentPlayers ?? 0);
-  // If Conclave provides counts, use them.
   if (playerCount > 0) return currentPlayers < playerCount;
-  // If counts missing, we cannot know. Assume yes and let join tell us.
   return true;
 }
 
-function pickDebatesOrdered(debates) {
-  const phaseWeight = (p) => {
-    p = (p || "").toLowerCase();
-    if (p === "debate") return 30;
-    if (p === "allocation") return 20;
-    if (p === "propose") return 10;
-    return 0;
-  };
+function phaseRank(p) {
+  p = (p || "").toLowerCase();
+  // Joining is most likely to be allowed in propose.
+  if (p === "propose") return 0;
+  if (p === "debate") return 1;
+  if (p === "allocation") return 2;
+  return 3;
+}
 
-  const scored = debates.map((d) => {
-    const score = phaseWeight(d.phase) + Math.min(Number(d.currentPlayers || 0), 10);
-    return { d, score };
-  });
+function orderDebates(debates) {
+  // Sort by best phase first, then by having room, then by fewer players (more likely open)
+  return debates
+    .slice()
+    .sort((a, b) => {
+      const pa = phaseRank(a.phase);
+      const pb = phaseRank(b.phase);
+      if (pa !== pb) return pa - pb;
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored.map((x) => x.d);
+      const ra = debateHasRoom(a) ? 0 : 1;
+      const rb = debateHasRoom(b) ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+
+      const ca = Number(a.currentPlayers ?? 0);
+      const cb = Number(b.currentPlayers ?? 0);
+      return ca - cb;
+    });
 }
 
 (async () => {
@@ -92,7 +100,6 @@ function pickDebatesOrdered(debates) {
 
   if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
 
-  // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
 
@@ -105,7 +112,6 @@ function pickDebatesOrdered(debates) {
   const phase = (statusRes.json.phase || "").toLowerCase();
   if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
 
-  // 2) If not in debate, try to join one that has room
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
@@ -117,13 +123,9 @@ function pickDebatesOrdered(debates) {
 
     const debates = debatesRes.json.debates || [];
     if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
-    if (debates.length === 0) {
-      // Skill.md suggests you could create a debate if none exist.
-      // For now: silent noop.
-      process.exit(0);
-    }
+    if (debates.length === 0) process.exit(0);
 
-    const ordered = pickDebatesOrdered(debates).filter(debateHasRoom);
+    const ordered = orderDebates(debates).filter(debateHasRoom);
 
     const joinBody = {
       name: "Neo",
@@ -131,13 +133,13 @@ function pickDebatesOrdered(debates) {
       description: "High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
     };
 
-    // Try up to 10 open debates (or fewer if less exist)
     const maxAttempts = Math.min(10, ordered.length);
+
     for (let idx = 0; idx < maxAttempts; idx++) {
       const d = ordered[idx];
       if (!d?.id) continue;
 
-      if (debug) console.error(`[conclave_tick] attempt=${idx + 1}/${maxAttempts} id=${d.id}`);
+      if (debug) console.error(`[conclave_tick] attempt=${idx + 1}/${maxAttempts} id=${d.id} phase=${String(d.phase || "")}`);
 
       const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, joinBody);
       if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
@@ -147,21 +149,20 @@ function pickDebatesOrdered(debates) {
         process.exit(0);
       }
 
-      const errMsg = safeErrMsg(joinRes).toLowerCase();
+      const err = safeErrMsg(joinRes).toLowerCase();
 
-      // If full (or similar), silently try the next one.
-      if (errMsg.includes("full")) continue;
+      // Retryable: skip and try next debate
+      if (err.includes("full") || err.includes("not accepting players")) continue;
 
-      // Other errors: notify and stop.
+      // Non-retryable: notify
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    // If we reach here, we could not join any open debate. Stay silent.
+    // Could not join any. Stay silent.
     process.exit(0);
   }
 
-  // 3) In debate: allocation needs approval
   if (phase === "allocation") {
     await tgSend(
       tgBotToken,
@@ -171,7 +172,6 @@ function pickDebatesOrdered(debates) {
     process.exit(0);
   }
 
-  // 4) Debate phase: silent noop for now
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
