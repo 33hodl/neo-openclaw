@@ -24,7 +24,6 @@ async function httpJson(method, path, token, bodyObj) {
 
   const opts = { method, headers };
 
-  // Only attach a body if we truly have one.
   if (bodyObj !== undefined && bodyObj !== null) {
     opts.body = JSON.stringify(bodyObj);
   }
@@ -50,8 +49,6 @@ async function tgSend(botToken, chatId, text) {
 }
 
 function pickDebate(debates) {
-  // Prefer debates in active phases (debate/allocation) and with room for players.
-  // Fall back to first.
   const scored = debates.map((d) => {
     let score = 0;
     const phase = (d.phase || "").toLowerCase();
@@ -63,7 +60,6 @@ function pickDebate(debates) {
     const currentPlayers = Number(d.currentPlayers || 0);
     if (playerCount && currentPlayers < playerCount) score += 10;
 
-    // Slight bias for more active debates
     score += Math.min(currentPlayers, 10);
 
     return { d, score };
@@ -97,15 +93,10 @@ function pickDebate(debates) {
     }
 
     const debates = debatesRes.json.debates || [];
-    if (debates.length === 0) {
-      // Silent NOOP: nothing to do
-      process.exit(0);
-    }
+    if (debates.length === 0) process.exit(0);
 
     const chosen = pickDebate(debates);
-    if (!chosen?.id) {
-      process.exit(0);
-    }
+    if (!chosen?.id) process.exit(0);
 
     const joinBody = {
       name: "Neo",
@@ -115,31 +106,8 @@ function pickDebate(debates) {
 
     const joinRes = await httpJson("POST", `/debates/${chosen.id}/join`, conclaveToken, joinBody);
     if (joinRes.status !== 200) {
-      await tgSend(
-        tgBotToken,
-        tgChatId,
-        `Conclave ERR join ${joinRes.status} id=${chosen.id} ${snip(joinRes.text)}`
-      );
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${chosen.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${chosen.id} phase=${snip(joinRes.text, 120)}`);
-    process.exit(0);
-  }
-
-  // 3) In debate: allocation needs approval
-  if (phase === "allocation") {
-    await tgSend(
-      tgBotToken,
-      tgChatId,
-      "Conclave APPROVAL needed: allocation phase is live. Tell me your allocation plan (percentages) and I’ll submit it."
-    );
-    process.exit(0);
-  }
-
-  // 4) Debate phase: do NOT spam. Safe default is NOOP (silent).
-  // You can upgrade later to comment/refine with real logic.
-  process.exit(0);
-})().catch(async (e) => {
-  try {
-    const tgBotToken =
+    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${chosen.id} ${
