@@ -23,6 +23,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Add proxy
 COPY --from=proxy-builder /proxy-bin /usr/local/bin/proxy
 
+# Copy your cron script into the container at a stable path
+COPY conclave_tick.js /app/conclave_tick.js
+
+# Make sure the non-root node user can read it
+RUN chown node:node /app/conclave_tick.js
+
 # Create CLI wrapper (openclaw code is at /app/dist/index.js in base image)
 RUN printf '#!/bin/sh\nexec node /app/dist/index.js "$@"\n' > /usr/local/bin/openclaw \
   && chmod +x /usr/local/bin/openclaw
