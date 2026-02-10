@@ -1,6 +1,7 @@
 // conclave_tick.js
 // Runs one Conclave tick. Sends Telegram only on action/error/approval.
-// Designed for Render Cron Jobs (no disk needed). Node 18+.
+// Optional debug: set CONCLAVE_TICK_DEBUG=1 to log to Render.
+// Optional ping: set CONCLAVE_TICK_PING=1 to send a Telegram heartbeat.
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -13,6 +14,11 @@ function mustGetEnv(name) {
 function snip(s, n = 220) {
   if (!s) return "";
   return s.length > n ? s.slice(0, n) + "..." : s;
+}
+
+function isOn(name) {
+  const v = (process.env[name] || "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
 async function httpJson(method, path, token, bodyObj) {
@@ -66,12 +72,25 @@ function pickDebate(debates) {
 }
 
 (async () => {
+  const debug = isOn("CONCLAVE_TICK_DEBUG");
+  const ping = isOn("CONCLAVE_TICK_PING");
+
   const conclaveToken = mustGetEnv("CONCLAVE_TOKEN");
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
+  if (debug) {
+    console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
+  }
+
+  if (ping) {
+    await tgSend(tgBotToken, tgChatId, `Conclave tick heartbeat: ${new Date().toISOString()}`);
+  }
+
   // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
+  if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
+
   if (statusRes.status !== 200 || !statusRes.json) {
     await tgSend(tgBotToken, tgChatId, `Conclave ERR /status ${statusRes.status} ${snip(statusRes.text)}`);
     process.exit(0);
@@ -79,16 +98,21 @@ function pickDebate(debates) {
 
   const inDebate = !!statusRes.json.inDebate;
   const phase = (statusRes.json.phase || "").toLowerCase();
+  if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
 
   // 2) If not in debate, try to join one
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
+    if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
+
     if (debatesRes.status !== 200 || !debatesRes.json) {
       await tgSend(tgBotToken, tgChatId, `Conclave ERR /debates ${debatesRes.status} ${snip(debatesRes.text)}`);
       process.exit(0);
     }
 
     const debates = debatesRes.json.debates || [];
+    if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
+
     if (debates.length === 0) process.exit(0);
 
     const chosen = pickDebate(debates);
@@ -101,6 +125,8 @@ function pickDebate(debates) {
     };
 
     const joinRes = await httpJson("POST", `/debates/${chosen.id}/join`, conclaveToken, joinBody);
+    if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${chosen.id}`);
+
     if (joinRes.status !== 200) {
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${chosen.id} ${snip(joinRes.text)}`);
       process.exit(0);
@@ -123,11 +149,9 @@ function pickDebate(debates) {
   // 4) Debate phase: silent noop for now
   process.exit(0);
 })().catch(async (e) => {
-  // Always print the real error into Render logs
   const msg = e && e.stack ? e.stack : String(e);
   console.error("Conclave tick failed:", msg);
 
-  // Try Telegram if configured
   try {
     const tgBotToken = process.env.TELEGRAM_BOT_TOKEN;
     const tgChatId = process.env.TELEGRAM_CHAT_ID;
