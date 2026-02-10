@@ -23,10 +23,7 @@ async function httpJson(method, path, token, bodyObj) {
   };
 
   const opts = { method, headers };
-
-  if (bodyObj !== undefined && bodyObj !== null) {
-    opts.body = JSON.stringify(bodyObj);
-  }
+  if (bodyObj !== undefined && bodyObj !== null) opts.body = JSON.stringify(bodyObj);
 
   const res = await fetch(url, opts);
   const text = await res.text();
@@ -61,7 +58,6 @@ function pickDebate(debates) {
     if (playerCount && currentPlayers < playerCount) score += 10;
 
     score += Math.min(currentPlayers, 10);
-
     return { d, score };
   });
 
@@ -74,7 +70,6 @@ function pickDebate(debates) {
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
-  // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (statusRes.status !== 200 || !statusRes.json) {
     await tgSend(tgBotToken, tgChatId, `Conclave ERR /status ${statusRes.status} ${snip(statusRes.text)}`);
@@ -84,7 +79,6 @@ function pickDebate(debates) {
   const inDebate = !!statusRes.json.inDebate;
   const phase = (statusRes.json.phase || "").toLowerCase();
 
-  // 2) If not in debate, try to join one
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debatesRes.status !== 200 || !debatesRes.json) {
@@ -110,4 +104,28 @@ function pickDebate(debates) {
       process.exit(0);
     }
 
-    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${chosen.id} ${
+    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${chosen.id} ${snip(joinRes.text, 160)}`);
+    process.exit(0);
+  }
+
+  if (phase === "allocation") {
+    await tgSend(
+      tgBotToken,
+      tgChatId,
+      "Conclave APPROVAL needed: allocation phase is live. Reply with your allocation plan (percentages) and I will submit it."
+    );
+    process.exit(0);
+  }
+
+  process.exit(0);
+})().catch(async (e) => {
+  try {
+    const tgBotToken = process.env.TELEGRAM_BOT_TOKEN;
+    const tgChatId = process.env.TELEGRAM_CHAT_ID;
+    const msg = e && e.stack ? e.stack : String(e);
+    if (tgBotToken && tgChatId) {
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR tick failed:\n${snip(msg, 3500)}`);
+    }
+  } catch {}
+  process.exit(1);
+});
