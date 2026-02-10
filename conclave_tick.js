@@ -10,14 +10,14 @@ function mustGetEnv(name) {
   return v;
 }
 
-function snip(s, n = 220) {
-  if (!s) return "";
-  return s.length > n ? s.slice(0, n) + "..." : s;
-}
-
 function isOn(name) {
   const v = (process.env[name] || "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+function snip(s, n = 220) {
+  if (!s) return "";
+  return s.length > n ? s.slice(0, n) + "..." : s;
 }
 
 async function httpJson(method, path, token, bodyObj) {
@@ -56,6 +56,15 @@ function safeErrMsg(joinRes) {
   return String(joinRes.text || "");
 }
 
+function debateHasRoom(d) {
+  const playerCount = Number(d.playerCount ?? 0);
+  const currentPlayers = Number(d.currentPlayers ?? 0);
+  // If Conclave provides counts, use them.
+  if (playerCount > 0) return currentPlayers < playerCount;
+  // If counts missing, we cannot know. Assume yes and let join tell us.
+  return true;
+}
+
 function pickDebatesOrdered(debates) {
   const phaseWeight = (p) => {
     p = (p || "").toLowerCase();
@@ -66,7 +75,7 @@ function pickDebatesOrdered(debates) {
   };
 
   const scored = debates.map((d) => {
-    const score = phaseWeight(d.phase) + Math.min(Number(d.currentPlayers || d.players || d.participants || 0), 10);
+    const score = phaseWeight(d.phase) + Math.min(Number(d.currentPlayers || 0), 10);
     return { d, score };
   });
 
@@ -83,6 +92,7 @@ function pickDebatesOrdered(debates) {
 
   if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
 
+  // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
 
@@ -95,6 +105,7 @@ function pickDebatesOrdered(debates) {
   const phase = (statusRes.json.phase || "").toLowerCase();
   if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
 
+  // 2) If not in debate, try to join one that has room
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
@@ -106,18 +117,22 @@ function pickDebatesOrdered(debates) {
 
     const debates = debatesRes.json.debates || [];
     if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
-    if (debates.length === 0) process.exit(0);
+    if (debates.length === 0) {
+      // Skill.md suggests you could create a debate if none exist.
+      // For now: silent noop.
+      process.exit(0);
+    }
 
-    const ordered = pickDebatesOrdered(debates);
+    const ordered = pickDebatesOrdered(debates).filter(debateHasRoom);
+
     const joinBody = {
       name: "Neo",
       ticker: "SMOKE",
       description: "High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
     };
 
-    const maxAttempts = Math.min(5, ordered.length);
-    let fullCount = 0;
-
+    // Try up to 10 open debates (or fewer if less exist)
+    const maxAttempts = Math.min(10, ordered.length);
     for (let idx = 0; idx < maxAttempts; idx++) {
       const d = ordered[idx];
       if (!d?.id) continue;
@@ -132,26 +147,21 @@ function pickDebatesOrdered(debates) {
         process.exit(0);
       }
 
-      const errMsg = safeErrMsg(joinRes);
-      const isFull = errMsg.toLowerCase().includes("full");
+      const errMsg = safeErrMsg(joinRes).toLowerCase();
 
-      if (isFull) {
-        fullCount += 1;
-        continue;
-      }
+      // If full (or similar), silently try the next one.
+      if (errMsg.includes("full")) continue;
 
+      // Other errors: notify and stop.
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    if (fullCount === maxAttempts) {
-      // Optional: one message so you know everything is full
-      await tgSend(tgBotToken, tgChatId, `Conclave INFO: tried ${maxAttempts} debates, all were full. Will retry next run.`);
-    }
-
+    // If we reach here, we could not join any open debate. Stay silent.
     process.exit(0);
   }
 
+  // 3) In debate: allocation needs approval
   if (phase === "allocation") {
     await tgSend(
       tgBotToken,
@@ -161,6 +171,7 @@ function pickDebatesOrdered(debates) {
     process.exit(0);
   }
 
+  // 4) Debate phase: silent noop for now
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
