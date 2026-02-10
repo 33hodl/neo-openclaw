@@ -1,8 +1,11 @@
 // conclave_tick.js
-// Render Cron tick for Conclave.
-// Goals: maximize smoke with minimal operator noise.
-// Telegram: only on errors + low balance.
-// Automation: join with real proposal + auto-refine weak proposal.
+// Goal: maximize smoke with minimal noise.
+// Strategy:
+// 1) Join joinable debates (skip ended/full/not accepting).
+// 2) Submit a real proposal on join (use debate brief to generate a structured proposal).
+// 3) Auto-allocate when allocation phase opens (required to earn).
+// Notifications: only on errors and low balance.
+// Optional debug: CONCLAVE_TICK_DEBUG=1
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -12,8 +15,9 @@ function mustGetEnv(name) {
   return v;
 }
 
-function optEnv(name, fallback = "") {
-  return process.env[name] ? String(process.env[name]) : fallback;
+function snip(s, n = 220) {
+  if (!s) return "";
+  return s.length > n ? s.slice(0, n) + "..." : s;
 }
 
 function isOn(name) {
@@ -21,9 +25,16 @@ function isOn(name) {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
-function snip(s, n = 220) {
-  if (!s) return "";
-  return s.length > n ? s.slice(0, n) + "..." : s;
+function numEnv(name, fallback) {
+  const raw = (process.env[name] || "").trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function strEnv(name, fallback) {
+  const v = (process.env[name] || "").trim();
+  return v ? v : fallback;
 }
 
 async function httpJson(method, path, token, bodyObj) {
@@ -62,215 +73,148 @@ function safeErrMsg(res) {
   return String(res.text || "");
 }
 
-function normalizeStr(x) {
-  return String(x || "").trim();
+function phaseNorm(p) {
+  return String(p || "").trim().toLowerCase();
 }
 
-function debatePhase(p) {
-  return normalizeStr(p).toLowerCase();
-}
+function isJoinableDebate(d) {
+  const p = phaseNorm(d.phase);
+  if (!p) return true; // some responses omit phase
+  if (p === "ended" || p === "results" || p === "closed") return false;
 
-function debateHasRoom(d) {
-  const playerCount = Number(d.playerCount ?? 0);
-  const currentPlayers = Number(d.currentPlayers ?? 0);
-  if (playerCount > 0) return currentPlayers < playerCount;
+  const pc = Number(d.playerCount || 0);
+  const cur = Number(d.currentPlayers || 0);
+  if (pc && cur >= pc) return false;
+
   return true;
 }
 
-function joinableDebate(d) {
-  const p = debatePhase(d.phase);
-  if (!d?.id) return false;
-  if (!debateHasRoom(d)) return false;
-  if (p === "ended" || p === "results") return false;
-  return true;
-}
-
-function phaseRank(p) {
-  p = debatePhase(p);
-  if (p === "propose" || p === "proposal") return 0;
-  if (p === "debate") return 1;
-  if (p === "allocation") return 2;
-  if (p === "results") return 3;
-  if (p === "ended") return 4;
-  return 5;
-}
-
-function orderDebates(debates) {
-  return debates
-    .slice()
-    .filter(joinableDebate)
-    .sort((a, b) => {
-      const pa = phaseRank(a.phase);
-      const pb = phaseRank(b.phase);
-      if (pa !== pb) return pa - pb;
-
-      const ca = Number(a.currentPlayers ?? 0);
-      const cb = Number(b.currentPlayers ?? 0);
-      return ca - cb;
-    });
-}
-
-function makeTickerFromTheme(theme, fallbackSeed) {
-  const t = normalizeStr(theme)
-    .toUpperCase()
-    .replace(/[^A-Z ]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean);
-
-  const keywords = t.join(" ");
-  const picks = [];
-  if (keywords.includes("PROVENANCE")) picks.push("TRACE");
-  if (keywords.includes("AUTHENTIC")) picks.push("AUTH");
-  if (keywords.includes("SUPPLY")) picks.push("CHAIN");
-  if (keywords.includes("PHYSICAL")) picks.push("TAG");
-  if (keywords.includes("GOODS")) picks.push("PROOF");
-  if (keywords.includes("ONCHAIN")) picks.push("ATTEST");
-
-  for (const p of picks) {
-    const s = p.replace(/[^A-Z]/g, "");
-    if (s.length >= 3 && s.length <= 6) return s;
-    if (s.length > 6) return s.slice(0, 6);
-  }
-
-  let init = t.slice(0, 3).map((w) => w[0]).join("");
-  init = init.replace(/[^A-Z]/g, "");
-  if (init.length >= 3) return init.slice(0, 6);
-
-  const seed = normalizeStr(fallbackSeed || "SEED");
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  let out = "";
-  for (let i = 0; i < 4; i++) {
-    out += letters[h % 26];
-    h = (h / 26) >>> 0;
-  }
-  return out.slice(0, 6);
-}
-
-function buildProposalFromBrief(theme, desc) {
-  const T = normalizeStr(theme);
-  const D = normalizeStr(desc);
-  const lower = (T + " " + D).toLowerCase();
-
-  if (lower.includes("provenance") || lower.includes("authentic") || lower.includes("physical") || lower.includes("supply")) {
-    return [
-      "Patina Rail: provenance you can audit, without pretending atoms are trustless.",
-      "",
-      "Problem:",
-      "Most “digital twin” systems fail at the first attestation. If the first claim is social, the rest is just expensive storytelling.",
-      "",
-      "Solution:",
-      "A two-layer provenance rail:",
-      "1) Tamper-evident physical tags (secure element NFC + optical micro-pattern) binding an item to a rotating onchain identity.",
-      "2) A witness network that signs state transitions (manufactured, shipped, received, serviced, resold) with stake and slashing for provable fraud.",
-      "",
-      "How it works:",
-      "- Manufacturer mints the genesis event with an authorized identity.",
-      "- Each custody transfer requires sender + receiver signatures.",
-      "- High-value events require extra independent witnesses.",
-      "- Witnesses earn per valid event and get slashed for false attestations.",
-      "- Verifiers get a one-click provenance trail + confidence score.",
-      "",
-      "Hard parts:",
-      "- Bootstrapping credible issuers and witnesses: start narrow (luxury resale, art, collectibles).",
-      "- Fraud proofs and slashing conditions must be real, not vibes.",
-      "- UX: scan must work instantly and tolerate offline, with delayed settlement.",
-      "",
-      "Go-to-market:",
-      "Sell a verification SDK + badge to marketplaces. Lower disputes, higher conversion, higher take-rate.",
-    ].join("\n").slice(0, 2900);
-  }
-
-  return [
-    `${T || "Focused infrastructure proposal"}`,
-    "",
-    "Concrete proposal (not a slogan):",
-    "- Define the first buyer and the immediate KPI they pay for.",
-    "- Put only the minimum trust boundary onchain, keep the rest offchain.",
-    "- Add an accountability mechanism that makes cheating expensive.",
-    "",
-    "Hard parts to solve:",
-    "- Distribution: first 10 customers, not perfect architecture.",
-    "- Adversarial incentives: spam, sybil, fraud, bribery.",
-    "",
-    "Wedge then expand:",
-    "Start narrow, dominate a niche, then broaden after product-market fit.",
-  ].join("\n").slice(0, 2900);
-}
-
-function parseEth(str) {
-  const v = Number(String(str || "").trim());
-  if (!Number.isFinite(v) || v < 0) return null;
-  return v;
-}
-
-// Try to locate "our" idea inside /status ideas
-function findMyIdea(statusJson, myUsername) {
-  const ideas = statusJson?.ideas;
-  if (!Array.isArray(ideas) || !myUsername) return null;
-
-  const u = String(myUsername).trim().toLowerCase();
-  const matchesUser = (val) => {
-    const s = String(val || "").trim().toLowerCase();
-    if (!s) return false;
-    return s === u || s === "@" + u || s.replace(/^@/, "") === u;
+function pickDebatesOrdered(debates) {
+  const phaseWeight = (p) => {
+    p = phaseNorm(p);
+    if (p === "proposal" || p === "propose") return 40;
+    if (p === "debate") return 30;
+    if (p === "allocation") return 20;
+    return 10;
   };
 
-  for (const it of ideas) {
-    const idea = it?.idea || it;
+  const scored = debates
+    .filter(isJoinableDebate)
+    .map((d) => {
+      const cur = Number(d.currentPlayers || d.players || d.participants || 0);
+      const score = phaseWeight(d.phase) + Math.min(cur, 10);
+      return { d, score };
+    });
 
-    const ideaId = idea?.ideaId || idea?.id || idea?.uuid;
-    const ticker = idea?.ticker || idea?.symbol;
-    const description = idea?.description || idea?.body || idea?.text;
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((x) => x.d);
+}
 
-    const proposer =
-      idea?.proposer ||
-      idea?.author ||
-      idea?.username ||
-      idea?.agentUsername ||
-      idea?.player ||
-      idea?.handle ||
-      idea?.creator;
+// Generates a structured proposal from the debate brief.
+// Not perfect, but far better than your previous slogan.
+function buildProposalFromBrief(brief) {
+  const text = String(brief || "").trim();
+  const theme = text.slice(0, 140);
 
-    if (ideaId && (matchesUser(proposer) || matchesUser(idea?.proposerUsername) || matchesUser(idea?.authorUsername))) {
-      return { ideaId, ticker, description };
-    }
+  return [
+    `Idea: ${theme ? theme : "Practical onchain infrastructure"} (MVP-first, measurable).`,
+    "",
+    "Problem:",
+    "- Current solutions are barcode theater: centralized attestations pretending to be trustless.",
+    "- The hardest part is binding a real-world object to a verifiable onchain identity without trusted custody.",
+    "",
+    "Solution:",
+    "- Hybrid design: tamper-evident hardware + cryptographic attestations + incentive-aligned challengers.",
+    "- Every physical item gets a rooted identity (device key or secure element). Events are signed and posted onchain.",
+    "- Independent verifiers stake to challenge fraudulent events; disputes slash bad actors.",
+    "",
+    "MVP (4 weeks):",
+    "1) Simple object registry + signed event schema",
+    "2) Attestation API + open verifier client",
+    "3) Challenge flow + slashing rules (testnet)",
+    "",
+    "Hard parts (address head-on):",
+    "- Secure key management for manufacturers",
+    "- Verifier incentives and anti-sybil",
+    "- Recovery flows for damaged/lost tags",
+    "",
+    "Why it wins:",
+    "- It is specific, shippable, and attacks the core trust problem instead of adding more QR codes.",
+  ].join("\n").slice(0, 2950);
+}
 
-    // Sometimes proposer is nested
-    if (ideaId && idea?.proposer && typeof idea.proposer === "object") {
-      const p = idea.proposer;
-      if (matchesUser(p.username) || matchesUser(p.handle) || matchesUser(p.name)) {
-        return { ideaId, ticker, description };
-      }
-    }
+// Allocation scoring: default is to overweight your own idea if present, then diversify.
+// Conclave rules: must allocate to 2+ ideas, total 100, max 60% per idea.
+function buildAllocations(ideas, myTicker) {
+  const list = Array.isArray(ideas) ? ideas : [];
+  if (list.length < 2) return null;
+
+  // Find my idea
+  const mine = list.find((x) => String(x.ticker || "").toUpperCase() === String(myTicker || "").toUpperCase());
+
+  // Sort others by crude “activity” if available
+  const others = list
+    .filter((x) => !mine || x.ideaId !== mine.ideaId)
+    .map((x) => {
+      const comments = Number(x.commentCount || x.comments || 0);
+      const refined = Number(x.refineCount || x.refinedCount || 0);
+      const score = comments * 2 + refined * 3;
+      return { x, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .map((k) => k.x);
+
+  const a = [];
+  const maxSelf = Math.min(60, Math.max(0, Math.floor(numEnv("CONCLAVE_SELF_ALLOC_PCT", 60))));
+  const pickCount = Math.max(2, Math.min(3, 1 + others.length)); // aim for 2-3 ideas
+
+  if (mine && mine.ideaId) {
+    a.push({ ideaId: mine.ideaId, percentage: maxSelf });
   }
 
-  return null;
-}
+  // Ensure at least 2 ideas
+  const remaining = 100 - (a[0]?.percentage || 0);
+  const second = others[0];
+  const third = others[1];
 
-function looksWeakProposal(text) {
-  const t = String(text || "").trim();
-  if (!t) return true;
+  if (!second || !second.ideaId) return null;
 
-  // Too short = almost certainly garbage in Conclave context
-  if (t.length < 280) return true;
+  if (!mine) {
+    // If we do not have our own idea (should be rare), allocate 60/40 to top 2
+    a.push({ ideaId: second.ideaId, percentage: 60 });
+    const next = others[1];
+    if (next && next.ideaId) a.push({ ideaId: next.ideaId, percentage: 40 });
+    else a[0].percentage = 100;
+    // Fix rule: must allocate to 2+ ideas, so if only one exists, return null
+    return a.length >= 2 ? a : null;
+  }
 
-  // Generic slogan fingerprints
-  const lower = t.toLowerCase();
-  if (lower.includes("optimize for smoke") || lower.includes("high-signal participation")) return true;
-  if (lower.includes("consistent, meaningful engagement") && t.length < 700) return true;
+  // We have mine. Split remaining across top 1-2 others.
+  if (pickCount >= 3 && third && third.ideaId) {
+    const p2 = Math.floor(remaining * 0.7);
+    const p3 = remaining - p2;
+    a.push({ ideaId: second.ideaId, percentage: p2 });
+    a.push({ ideaId: third.ideaId, percentage: p3 });
+  } else {
+    a.push({ ideaId: second.ideaId, percentage: remaining });
+  }
 
-  return false;
-}
+  // Sanity: totals must be 100 and all >0
+  const total = a.reduce((s, z) => s + z.percentage, 0);
+  if (total !== 100) {
+    // Fix rounding drift
+    a[a.length - 1].percentage += 100 - total;
+  }
+  if (a.some((z) => z.percentage <= 0)) return null;
+  if (a.length < 2) return null;
+  if (a.some((z) => z.percentage > 60)) {
+    // Clamp any accidental >60
+    for (const z of a) z.percentage = Math.min(z.percentage, 60);
+    const t2 = a.reduce((s, z) => s + z.percentage, 0);
+    a[a.length - 1].percentage += 100 - t2;
+  }
 
-function alreadyRefinedIntoRealProposal(text) {
-  const t = String(text || "");
-  const lower = t.toLowerCase();
-  // Markers from our generated proposal
-  if (lower.includes("patina rail") && lower.includes("go-to-market")) return true;
-  if (lower.includes("two-layer provenance rail") && lower.includes("hard parts")) return true;
-  return false;
+  return { allocations: a };
 }
 
 (async () => {
@@ -280,24 +224,19 @@ function alreadyRefinedIntoRealProposal(text) {
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
-  const myUsername = optEnv("CONCLAVE_USERNAME", "").trim(); // add this env var
-  const lowBalEth = parseEth(process.env.CONCLAVE_LOW_BALANCE_ETH);
+  const username = strEnv("CONCLAVE_USERNAME", "DiamondHandsDig");
+  const ticker = strEnv("CONCLAVE_TICKER", "SMOKE");
+
+  const lowBal = numEnv("CONCLAVE_LOW_BALANCE_ETH", 0.001);
 
   if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
 
-  // Low balance only
-  if (lowBalEth !== null) {
-    const balRes = await httpJson("GET", "/balance", conclaveToken, null);
-    if (debug) console.error(`[conclave_tick] /balance ${balRes.status}`);
-    if (balRes.status === 200 && balRes.json && balRes.json.balance !== undefined) {
-      const bal = Number(balRes.json.balance);
-      if (Number.isFinite(bal) && bal < lowBalEth) {
-        await tgSend(
-          tgBotToken,
-          tgChatId,
-          `Conclave LOW BALANCE: ${bal} ETH < ${lowBalEth} ETH. Fund wallet ${snip(String(balRes.json.walletAddress || ""), 80)}`
-        );
-      }
+  // Balance check (notify only if low)
+  const balRes = await httpJson("GET", "/balance", conclaveToken, null);
+  if (balRes.status === 200 && balRes.json && balRes.json.balance != null) {
+    const b = Number(balRes.json.balance);
+    if (Number.isFinite(b) && b <= lowBal) {
+      await tgSend(tgBotToken, tgChatId, `Conclave LOW BALANCE: ${b} ETH. Top up walletAddress=${balRes.json.walletAddress || "?"}`);
     }
   }
 
@@ -310,113 +249,84 @@ function alreadyRefinedIntoRealProposal(text) {
     process.exit(0);
   }
 
-  const inDebate = !!statusRes.json.inDebate;
-  const phase = debatePhase(statusRes.json.phase);
-  if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
+  const inGame = !!(statusRes.json.inGame || statusRes.json.inDebate); // handle API change
+  const phase = phaseNorm(statusRes.json.phase);
+  if (debug) console.error(`[conclave_tick] inGame=${inGame} phase=${phase}`);
 
-  // If in debate, auto-refine weak proposal during propose/debate phases
-  if (inDebate && (phase === "propose" || phase === "proposal" || phase === "debate")) {
-    const myIdea = findMyIdea(statusRes.json, myUsername);
+  // If in game and allocation phase: auto-allocate
+  if (inGame && phase === "allocation") {
+    const ideas = statusRes.json.ideas || statusRes.json.proposals || [];
+    const allocBody = buildAllocations(ideas, ticker);
 
-    if (debug) console.error(`[conclave_tick] myIdea=${myIdea ? "found" : "not_found"} username=${myUsername || "(missing)"}`);
-
-    if (myIdea && myIdea.ideaId) {
-      const cur = String(myIdea.description || "");
-
-      if (!alreadyRefinedIntoRealProposal(cur) && looksWeakProposal(cur)) {
-        // We need the debate brief to generate the right refined description.
-        const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
-        if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
-
-        if (debatesRes.status === 200 && debatesRes.json) {
-          const debates = debatesRes.json.debates || [];
-          // Best-effort: use the first active debate brief. Conclave usually has you in one.
-          const active = debates
-            .slice()
-            .filter((d) => joinableDebate(d))
-            .sort((a, b) => phaseRank(a.phase) - phaseRank(b.phase))[0];
-
-          const theme = active?.brief?.theme || active?.brief?.title || active?.theme || "";
-          const desc = active?.brief?.description || active?.brief?.desc || active?.description || "";
-
-          const refined = buildProposalFromBrief(theme, desc);
-
-          const refineBody = {
-            ideaId: myIdea.ideaId,
-            description: refined,
-            note: "Upgraded from placeholder into a concrete, debate-aligned proposal (auto-refine).",
-          };
-
-          const refRes = await httpJson("POST", "/refine", conclaveToken, refineBody);
-          if (debug) console.error(`[conclave_tick] /refine ${refRes.status}`);
-
-          // Only notify if refine failed. Otherwise stay silent.
-          if (refRes.status !== 200) {
-            await tgSend(tgBotToken, tgChatId, `Conclave ERR /refine ${refRes.status} ${snip(refRes.text)}`);
-          }
-        }
-      }
-    }
-
-    process.exit(0);
-  }
-
-  // Not in debate: join with real proposal
-  if (!inDebate) {
-    const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
-    if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
-
-    if (debatesRes.status !== 200 || !debatesRes.json) {
-      await tgSend(tgBotToken, tgChatId, `Conclave ERR /debates ${debatesRes.status} ${snip(debatesRes.text)}`);
+    if (!allocBody) {
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR allocate: could not build allocations (ideas=${Array.isArray(ideas) ? ideas.length : "?"}).`);
       process.exit(0);
     }
 
-    const debates = debatesRes.json.debates || [];
-    if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
-    if (debates.length === 0) process.exit(0);
+    const allocRes = await httpJson("POST", "/allocate", conclaveToken, allocBody);
+    if (debug) console.error(`[conclave_tick] /allocate ${allocRes.status}`);
 
-    const ordered = orderDebates(debates);
-    const maxAttempts = Math.min(8, ordered.length);
-
-    for (let idx = 0; idx < maxAttempts; idx++) {
-      const d = ordered[idx];
-      if (!d?.id) continue;
-
-      const theme = d?.brief?.theme || d?.brief?.title || d?.theme || "";
-      const desc = d?.brief?.description || d?.brief?.desc || d?.description || "";
-
-      const ticker = makeTickerFromTheme(theme, d.id);
-      const proposal = buildProposalFromBrief(theme, desc);
-
-      const joinBody = {
-        name: "Neo",
-        ticker,
-        description: proposal,
-      };
-
-      if (debug) console.error(`[conclave_tick] attempt=${idx + 1}/${maxAttempts} id=${d.id} phase=${String(d.phase || "")} ticker=${ticker}`);
-
-      const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, joinBody);
-      if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
-
-      if (joinRes.status === 200) process.exit(0);
-
-      const err = safeErrMsg(joinRes).toLowerCase();
-      if (err.includes("full") || err.includes("not accepting players")) continue;
-
-      await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
-      process.exit(0);
+    if (allocRes.status !== 200) {
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR /allocate ${allocRes.status} ${snip(allocRes.text)}`);
     }
 
     process.exit(0);
   }
 
-  // Allocation phase: still automated, still silent unless error
-  if (phase === "allocation") {
-    // Leave as no-op for now. If you want auto-allocation later, we can add it back.
+  // If in game but not allocation: do nothing (no noise, no spam)
+  if (inGame) process.exit(0);
+
+  // Not in game: try join a joinable debate
+  const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
+  if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
+
+  if (debatesRes.status !== 200 || !debatesRes.json) {
+    await tgSend(tgBotToken, tgChatId, `Conclave ERR /debates ${debatesRes.status} ${snip(debatesRes.text)}`);
     process.exit(0);
   }
 
+  const debates = debatesRes.json.debates || [];
+  if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
+  if (debates.length === 0) process.exit(0);
+
+  const ordered = pickDebatesOrdered(debates);
+  const maxAttempts = Math.min(numEnv("CONCLAVE_MAX_JOIN_ATTEMPTS", 5), ordered.length);
+
+  for (let idx = 0; idx < maxAttempts; idx++) {
+    const d = ordered[idx];
+    if (!d?.id) continue;
+
+    const p = phaseNorm(d.phase);
+    if (debug) console.error(`[conclave_tick] attempt=${idx + 1}/${maxAttempts} id=${d.id} phase=${p || "?"}`);
+
+    const joinBody = {
+      name: username,
+      ticker,
+      description: buildProposalFromBrief(d.brief?.theme || d.brief?.description || d.brief || ""),
+    };
+
+    const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, joinBody);
+    if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
+
+    if (joinRes.status === 200) {
+      // No join notification (noise). Success is visible in Conclave UI.
+      process.exit(0);
+    }
+
+    const errMsg = safeErrMsg(joinRes).toLowerCase();
+    const isFull = errMsg.includes("full");
+    const notAccepting = errMsg.includes("not accepting");
+    const ended = errMsg.includes("ended");
+
+    // Try next debate if this one is not joinable in practice
+    if (isFull || notAccepting || ended) continue;
+
+    // Hard error: notify
+    await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
+    process.exit(0);
+  }
+
+  // Silent: nothing joinable
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
