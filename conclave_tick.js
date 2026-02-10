@@ -70,6 +70,7 @@ function pickDebate(debates) {
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
+  // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (statusRes.status !== 200 || !statusRes.json) {
     await tgSend(tgBotToken, tgChatId, `Conclave ERR /status ${statusRes.status} ${snip(statusRes.text)}`);
@@ -79,6 +80,7 @@ function pickDebate(debates) {
   const inDebate = !!statusRes.json.inDebate;
   const phase = (statusRes.json.phase || "").toLowerCase();
 
+  // 2) If not in debate, try to join one
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debatesRes.status !== 200 || !debatesRes.json) {
@@ -108,6 +110,7 @@ function pickDebate(debates) {
     process.exit(0);
   }
 
+  // 3) In debate: allocation needs approval
   if (phase === "allocation") {
     await tgSend(
       tgBotToken,
@@ -117,15 +120,24 @@ function pickDebate(debates) {
     process.exit(0);
   }
 
+  // 4) Debate phase: silent noop for now
   process.exit(0);
 })().catch(async (e) => {
+  // Always print the real error into Render logs
+  const msg = e && e.stack ? e.stack : String(e);
+  console.error("Conclave tick failed:", msg);
+
+  // Try Telegram if configured
   try {
     const tgBotToken = process.env.TELEGRAM_BOT_TOKEN;
     const tgChatId = process.env.TELEGRAM_CHAT_ID;
-    const msg = e && e.stack ? e.stack : String(e);
     if (tgBotToken && tgChatId) {
       await tgSend(tgBotToken, tgChatId, `Conclave ERR tick failed:\n${snip(msg, 3500)}`);
     }
-  } catch {}
+  } catch (err2) {
+    const msg2 = err2 && err2.stack ? err2.stack : String(err2);
+    console.error("Also failed to send Telegram error:", msg2);
+  }
+
   process.exit(1);
 });
