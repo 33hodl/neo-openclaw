@@ -1,6 +1,15 @@
 // conclave_tick.js
-// Runs one Conclave tick. Sends Telegram only on action/error/approval.
-// Optional debug: set CONCLAVE_TICK_DEBUG=1 to log to Render.
+// Fully automated Conclave agent tick for Render Cron.
+// Behavior:
+// - NO Telegram noise on normal runs.
+// - Telegram only on: errors, low balance, and successful join (optional).
+// - Auto-join debates when not in a debate.
+// - During debate: post 1 comment per tick (strategic operator).
+// - During allocation: auto-allocate 100% diversified across ideas.
+// Optional env vars:
+// - CONCLAVE_TICK_DEBUG=1 (logs to Render)
+// - CONCLAVE_LOW_BALANCE_ETH=0.002 (notify if balance below; omit to disable)
+// - CONCLAVE_NOTIFY_ON_JOIN=1 (send Telegram when joined; default off)
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -50,10 +59,10 @@ async function tgSend(botToken, chatId, text) {
   if (!res.ok) throw new Error(`TELEGRAM_SEND_FAILED ${res.status} ${snip(out, 200)}`);
 }
 
-function safeErrMsg(joinRes) {
-  const j = joinRes.json;
+function safeErrMsg(res) {
+  const j = res.json;
   if (j && (j.error || j.message)) return String(j.error || j.message);
-  return String(joinRes.text || "");
+  return String(res.text || "");
 }
 
 function debateHasRoom(d) {
@@ -65,15 +74,14 @@ function debateHasRoom(d) {
 
 function phaseRank(p) {
   p = (p || "").toLowerCase();
-  // Joining is most likely to be allowed in propose.
-  if (p === "propose") return 0;
+  // Best chance to accept players: propose/proposal
+  if (p === "propose" || p === "proposal") return 0;
   if (p === "debate") return 1;
   if (p === "allocation") return 2;
-  return 3;
+  return 3; // ended/unknown last
 }
 
 function orderDebates(debates) {
-  // Sort by best phase first, then by having room, then by fewer players (more likely open)
   return debates
     .slice()
     .sort((a, b) => {
@@ -91,15 +99,95 @@ function orderDebates(debates) {
     });
 }
 
+// statusRes.json.ideas shape can vary; normalize to list of {ideaId, ticker, description}
+function normalizeIdeas(statusJson) {
+  const raw = statusJson?.ideas;
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((x) => {
+      if (!x) return null;
+      const ideaId = x.ideaId || x.id || x.uuid || x.idea?.id;
+      const ticker = x.ticker || x.symbol || x.idea?.ticker;
+      const description = x.description || x.text || x.idea?.description || "";
+      return { ideaId, ticker, description };
+    })
+    .filter((x) => x && x.ideaId && x.ticker);
+}
+
+function buildStrategicComment(idea) {
+  // Must be <= 280 chars per skill.md.
+  // Keep it sharp, operator style, low cringe, high signal.
+  const core = (idea.description || "").trim().slice(0, 140).replace(/\s+/g, " ");
+  const promptBit = core ? `I see: "${core}". ` : "";
+  const msg = `${promptBit}Operator lens: what is the hardest bottleneck (distribution, unit economics, or compliance) and the concrete mitigation? If that’s unclear, the idea is fragile.`;
+  return msg.length > 280 ? msg.slice(0, 277) + "..." : msg;
+}
+
+function allocateEvenly(ideas, maxIdeas = 10) {
+  // Conclave rules: total 100, allocate to 2+ ideas, max 60% per idea.
+  const picked = ideas.slice(0, Math.min(maxIdeas, ideas.length));
+  if (picked.length < 2) return null;
+
+  const n = picked.length;
+  const base = Math.floor(100 / n);
+  let remainder = 100 - base * n;
+
+  const allocations = picked.map((it) => {
+    let pct = base;
+    if (remainder > 0) {
+      pct += 1;
+      remainder -= 1;
+    }
+    // Safety clamp, should never exceed 60 with n>=2
+    if (pct > 60) pct = 60;
+    return { ideaId: it.ideaId, percentage: pct };
+  });
+
+  // If clamping ever caused sum != 100 (rare), fix by adjusting last element
+  const sum = allocations.reduce((a, b) => a + b.percentage, 0);
+  if (sum !== 100) {
+    allocations[allocations.length - 1].percentage += 100 - sum;
+  }
+
+  return { allocations };
+}
+
+function parseEth(str) {
+  const v = Number(String(str || "").trim());
+  if (!Number.isFinite(v) || v < 0) return null;
+  return v;
+}
+
 (async () => {
   const debug = isOn("CONCLAVE_TICK_DEBUG");
+  const notifyOnJoin = isOn("CONCLAVE_NOTIFY_ON_JOIN");
 
   const conclaveToken = mustGetEnv("CONCLAVE_TOKEN");
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
+  const lowBalEth = parseEth(process.env.CONCLAVE_LOW_BALANCE_ETH);
+
   if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
 
+  // Optional: balance check (notify only if low)
+  if (lowBalEth !== null) {
+    const balRes = await httpJson("GET", "/balance", conclaveToken, null);
+    if (debug) console.error(`[conclave_tick] /balance ${balRes.status}`);
+    if (balRes.status === 200 && balRes.json && balRes.json.balance !== undefined) {
+      const bal = Number(balRes.json.balance);
+      if (Number.isFinite(bal) && bal < lowBalEth) {
+        await tgSend(
+          tgBotToken,
+          tgChatId,
+          `Conclave LOW BALANCE: ${bal} ETH < ${lowBalEth} ETH. Fund wallet ${snip(String(balRes.json.walletAddress || ""), 80)}`
+        );
+      }
+    }
+  }
+
+  // Status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
 
@@ -112,6 +200,7 @@ function orderDebates(debates) {
   const phase = (statusRes.json.phase || "").toLowerCase();
   if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
 
+  // Not in debate: join
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
@@ -130,11 +219,10 @@ function orderDebates(debates) {
     const joinBody = {
       name: "Neo",
       ticker: "SMOKE",
-      description: "High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
+      description: "Strategic operator. High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
     };
 
     const maxAttempts = Math.min(10, ordered.length);
-
     for (let idx = 0; idx < maxAttempts; idx++) {
       const d = ordered[idx];
       if (!d?.id) continue;
@@ -145,33 +233,64 @@ function orderDebates(debates) {
       if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
 
       if (joinRes.status === 200) {
-        await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id} ${snip(joinRes.text, 160)}`);
+        if (notifyOnJoin) {
+          await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id}`);
+        }
         process.exit(0);
       }
 
       const err = safeErrMsg(joinRes).toLowerCase();
-
-      // Retryable: skip and try next debate
       if (err.includes("full") || err.includes("not accepting players")) continue;
 
-      // Non-retryable: notify
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    // Could not join any. Stay silent.
+    // Could not join any: silent.
     process.exit(0);
   }
 
+  // In debate
+  const ideas = normalizeIdeas(statusRes.json);
+
+  // Allocation: auto allocate diversified
   if (phase === "allocation") {
-    await tgSend(
-      tgBotToken,
-      tgChatId,
-      "Conclave APPROVAL needed: allocation phase is live. Reply with your allocation plan (percentages) and I will submit it."
-    );
+    const body = allocateEvenly(ideas, 10);
+    if (!body) {
+      // If less than 2 ideas, safest is to alert (this is abnormal)
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR allocation: not enough ideas to allocate (ideas=${ideas.length})`);
+      process.exit(0);
+    }
+
+    const allocRes = await httpJson("POST", "/allocate", conclaveToken, body);
+    if (debug) console.error(`[conclave_tick] /allocate ${allocRes.status}`);
+
+    if (allocRes.status !== 200) {
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR /allocate ${allocRes.status} ${snip(allocRes.text)}`);
+    }
     process.exit(0);
   }
 
+  // Debate: auto comment once per tick, strategic operator
+  if (phase === "debate" || phase === "propose" || phase === "proposal") {
+    if (ideas.length > 0) {
+      // Deterministic rotation without state: pick by current half-hour slot
+      const slot = Math.floor(Date.now() / (30 * 60 * 1000));
+      const idx = slot % ideas.length;
+      const it = ideas[idx];
+
+      const msg = buildStrategicComment(it);
+      const commentRes = await httpJson("POST", "/comment", conclaveToken, { ticker: it.ticker, message: msg });
+      if (debug) console.error(`[conclave_tick] /comment ${commentRes.status} ticker=${it.ticker}`);
+
+      if (commentRes.status !== 200) {
+        await tgSend(tgBotToken, tgChatId, `Conclave ERR /comment ${commentRes.status} ${snip(commentRes.text)}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  // Other phases: silent noop
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
