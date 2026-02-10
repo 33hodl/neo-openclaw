@@ -51,24 +51,34 @@ async function tgSend(botToken, chatId, text) {
   if (!res.ok) throw new Error(`TELEGRAM_SEND_FAILED ${res.status} ${snip(out, 200)}`);
 }
 
-function pickDebate(debates) {
+function safeJsonParse(s) {
+  try {
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+}
+
+function pickDebatesOrdered(debates) {
+  // Heuristic order: prefer “debate/allocation/propose” phases first, then whatever has more activity.
+  // We do NOT trust capacity fields because we do not know the schema. We will attempt join and handle “full”.
+  const phaseWeight = (p) => {
+    p = (p || "").toLowerCase();
+    if (p === "debate") return 30;
+    if (p === "allocation") return 20;
+    if (p === "propose") return 10;
+    return 0;
+  };
+
   const scored = debates.map((d) => {
-    let score = 0;
-    const phase = (d.phase || "").toLowerCase();
-    if (phase === "debate") score += 30;
-    if (phase === "allocation") score += 20;
-    if (phase === "propose") score += 10;
-
-    const playerCount = Number(d.playerCount || 0);
-    const currentPlayers = Number(d.currentPlayers || 0);
-    if (playerCount && currentPlayers < playerCount) score += 10;
-
-    score += Math.min(currentPlayers, 10);
+    const score =
+      phaseWeight(d.phase) +
+      Math.min(Number(d.currentPlayers || d.players || d.participants || 0), 10);
     return { d, score };
   });
 
   scored.sort((a, b) => b.score - a.score);
-  return scored[0]?.d || null;
+  return scored.map((x) => x.d);
 }
 
 (async () => {
@@ -79,15 +89,9 @@ function pickDebate(debates) {
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
-  if (debug) {
-    console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
-  }
+  if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
+  if (ping) await tgSend(tgBotToken, tgChatId, `Conclave tick heartbeat: ${new Date().toISOString()}`);
 
-  if (ping) {
-    await tgSend(tgBotToken, tgChatId, `Conclave tick heartbeat: ${new Date().toISOString()}`);
-  }
-
-  // 1) status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
 
@@ -100,7 +104,6 @@ function pickDebate(debates) {
   const phase = (statusRes.json.phase || "").toLowerCase();
   if (debug) console.error(`[conclave_tick] inDebate=${inDebate} phase=${phase}`);
 
-  // 2) If not in debate, try to join one
   if (!inDebate) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
@@ -112,11 +115,9 @@ function pickDebate(debates) {
 
     const debates = debatesRes.json.debates || [];
     if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
-
     if (debates.length === 0) process.exit(0);
 
-    const chosen = pickDebate(debates);
-    if (!chosen?.id) process.exit(0);
+    const ordered = pickDebatesOrdered(debates);
 
     const joinBody = {
       name: "Neo",
@@ -124,19 +125,38 @@ function pickDebate(debates) {
       description: "High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
     };
 
-    const joinRes = await httpJson("POST", `/debates/${chosen.id}/join`, conclaveToken, joinBody);
-    if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${chosen.id}`);
+    // Try up to 5 debates in order until one accepts us.
+    const maxAttempts = Math.min(5, ordered.length);
 
-    if (joinRes.status !== 200) {
-      await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${chosen.id} ${snip(joinRes.text)}`);
+    for (let idx = 0; idx < maxAttempts; idx++) {
+      const d = ordered[idx];
+      if (!d?.id) continue;
+
+      const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, joinBody);
+      if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
+
+      if (joinRes.status === 200) {
+        await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id} ${snip(joinRes.text, 160)}`);
+        process.exit(0);
+      }
+
+      // If it is full, silently try the next one.
+      const j = joinRes.json || safeJsonParse(joinRes.text);
+      const errMsg = (j && (j.error || j.message)) ? String(j.error || j.message) : joinRes.text;
+      const isFull =
+        joinRes.status === 400 && errMsg && errMsg.toLowerCase().includes("full");
+
+      if (isFull) continue;
+
+      // Other errors: notify and stop
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${chosen.id} ${snip(joinRes.text, 160)}`);
+    // Could not join any debate (likely all full). Stay silent.
     process.exit(0);
   }
 
-  // 3) In debate: allocation needs approval
   if (phase === "allocation") {
     await tgSend(
       tgBotToken,
@@ -146,7 +166,6 @@ function pickDebate(debates) {
     process.exit(0);
   }
 
-  // 4) Debate phase: silent noop for now
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
