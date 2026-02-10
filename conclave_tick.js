@@ -1,7 +1,6 @@
 // conclave_tick.js
 // Runs one Conclave tick. Sends Telegram only on action/error/approval.
 // Optional debug: set CONCLAVE_TICK_DEBUG=1 to log to Render.
-// Optional ping: set CONCLAVE_TICK_PING=1 to send a Telegram heartbeat.
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -51,17 +50,13 @@ async function tgSend(botToken, chatId, text) {
   if (!res.ok) throw new Error(`TELEGRAM_SEND_FAILED ${res.status} ${snip(out, 200)}`);
 }
 
-function safeJsonParse(s) {
-  try {
-    return s ? JSON.parse(s) : null;
-  } catch {
-    return null;
-  }
+function safeErrMsg(joinRes) {
+  const j = joinRes.json;
+  if (j && (j.error || j.message)) return String(j.error || j.message);
+  return String(joinRes.text || "");
 }
 
 function pickDebatesOrdered(debates) {
-  // Heuristic order: prefer “debate/allocation/propose” phases first, then whatever has more activity.
-  // We do NOT trust capacity fields because we do not know the schema. We will attempt join and handle “full”.
   const phaseWeight = (p) => {
     p = (p || "").toLowerCase();
     if (p === "debate") return 30;
@@ -71,9 +66,7 @@ function pickDebatesOrdered(debates) {
   };
 
   const scored = debates.map((d) => {
-    const score =
-      phaseWeight(d.phase) +
-      Math.min(Number(d.currentPlayers || d.players || d.participants || 0), 10);
+    const score = phaseWeight(d.phase) + Math.min(Number(d.currentPlayers || d.players || d.participants || 0), 10);
     return { d, score };
   });
 
@@ -83,14 +76,12 @@ function pickDebatesOrdered(debates) {
 
 (async () => {
   const debug = isOn("CONCLAVE_TICK_DEBUG");
-  const ping = isOn("CONCLAVE_TICK_PING");
 
   const conclaveToken = mustGetEnv("CONCLAVE_TOKEN");
   const tgBotToken = mustGetEnv("TELEGRAM_BOT_TOKEN");
   const tgChatId = mustGetEnv("TELEGRAM_CHAT_ID");
 
   if (debug) console.error(`[conclave_tick] start ${new Date().toISOString()} cwd=${process.cwd()}`);
-  if (ping) await tgSend(tgBotToken, tgChatId, `Conclave tick heartbeat: ${new Date().toISOString()}`);
 
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
@@ -118,19 +109,20 @@ function pickDebatesOrdered(debates) {
     if (debates.length === 0) process.exit(0);
 
     const ordered = pickDebatesOrdered(debates);
-
     const joinBody = {
       name: "Neo",
       ticker: "SMOKE",
       description: "High-signal participation. Optimize for smoke accumulation via consistent, meaningful engagement.",
     };
 
-    // Try up to 5 debates in order until one accepts us.
     const maxAttempts = Math.min(5, ordered.length);
+    let fullCount = 0;
 
     for (let idx = 0; idx < maxAttempts; idx++) {
       const d = ordered[idx];
       if (!d?.id) continue;
+
+      if (debug) console.error(`[conclave_tick] attempt=${idx + 1}/${maxAttempts} id=${d.id}`);
 
       const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, joinBody);
       if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
@@ -140,20 +132,23 @@ function pickDebatesOrdered(debates) {
         process.exit(0);
       }
 
-      // If it is full, silently try the next one.
-      const j = joinRes.json || safeJsonParse(joinRes.text);
-      const errMsg = (j && (j.error || j.message)) ? String(j.error || j.message) : joinRes.text;
-      const isFull =
-        joinRes.status === 400 && errMsg && errMsg.toLowerCase().includes("full");
+      const errMsg = safeErrMsg(joinRes);
+      const isFull = errMsg.toLowerCase().includes("full");
 
-      if (isFull) continue;
+      if (isFull) {
+        fullCount += 1;
+        continue;
+      }
 
-      // Other errors: notify and stop
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    // Could not join any debate (likely all full). Stay silent.
+    if (fullCount === maxAttempts) {
+      // Optional: one message so you know everything is full
+      await tgSend(tgBotToken, tgChatId, `Conclave INFO: tried ${maxAttempts} debates, all were full. Will retry next run.`);
+    }
+
     process.exit(0);
   }
 
