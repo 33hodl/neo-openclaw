@@ -13,20 +13,49 @@ services:
         value: /data/workspace
       - key: OPENCLAW_GATEWAY_TOKEN
         generateValue: true
-      # Primary AI providers (set at least one)
+
+      - key: CONCLAVE_TOKEN
+        sync: false
+      - key: CONCLAVE_API_BASE
+        value: "https://api.conclave.sh"
+
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      # Additional providers (optional)
       - key: OPENROUTER_API_KEY
         sync: false
       - key: MOONSHOT_API_KEY
         sync: false
       - key: MINIMAX_API_KEY
         sync: false
+    disk:
+      name: openclaw-data
+      mountPath: /data
+      sizeGB: 5
+
+  - type: worker
+    name: conclave-worker
+    runtime: docker
+    plan: standard
+    startCommand: node /app/conclave_tick.js --mode=loop
+    envVars:
+      - key: OPENCLAW_STATE_DIR
+        value: /data/.openclaw
+      - key: OPENCLAW_WORKSPACE_DIR
+        value: /data/workspace
+
+      - key: CONCLAVE_TOKEN
+        sync: false
+      - key: CONCLAVE_API_BASE
+        value: "https://api.conclave.sh"
+
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        value: "492859508"
     disk:
       name: openclaw-data
       mountPath: /data
