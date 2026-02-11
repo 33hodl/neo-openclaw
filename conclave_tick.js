@@ -1,12 +1,17 @@
 // conclave_tick.js
-// Conclave tick with low-noise Telegram and non-slop debate entries.
+// Low-noise Conclave automation + real in-game participation (comment + refine).
 //
-// Key behavior:
-// - Run frequently (ex: every 10 min) to join/allocate.
-// - Telegram only on: errors, join success, allocate success, and ONE daily balance message.
-// - No repeated low-balance spam. Low balance warning appears only in daily message.
-// - When joining a debate, generate a debate-specific ticker + a real proposal (not a one-liner).
-// - If we cannot generate a relevant proposal, skip joining that debate (avoid reputation damage).
+// Telegram only on:
+// - Errors
+// - Join success
+// - Allocate success
+// - ONE daily balance message (8pm SGT by default)
+//
+// Key fixes:
+// - No default SMOKE ticker unless debate explicitly about Conclave smoke.
+// - Join description is a structured proposal, not a one-liner.
+// - During debate/proposal: comment once per window, refine once if strong criticism appears.
+// - Stateless anti-spam: embeds a marker in our comment and checks existing comments for it.
 
 const API_BASE = "https://api.conclave.sh";
 
@@ -15,24 +20,20 @@ function mustGetEnv(name) {
   if (!v) throw new Error(`${name}_MISSING`);
   return v;
 }
-
 function env(name, fallback = "") {
   const v = process.env[name];
   return v === undefined || v === null ? fallback : String(v);
 }
-
 function isOn(name) {
   const v = env(name, "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
-
 function numEnv(name, fallback) {
   const raw = env(name, "").trim();
   if (!raw) return fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? n : fallback;
 }
-
 function snip(s, n = 220) {
   if (!s) return "";
   const str = String(s);
@@ -41,11 +42,7 @@ function snip(s, n = 220) {
 
 async function httpJson(method, path, token, bodyObj) {
   const url = `${API_BASE}${path}`;
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   const opts = { method, headers };
   if (bodyObj !== undefined && bodyObj !== null) opts.body = JSON.stringify(bodyObj);
 
@@ -78,12 +75,10 @@ function safeErrMsg(res) {
 function nowUtc() {
   return new Date();
 }
-
 function formatEth(n) {
   if (!Number.isFinite(n)) return "unknown";
   return n.toFixed(6);
 }
-
 function parseBalanceEth(balanceRes) {
   const j = balanceRes.json || {};
   const b =
@@ -96,10 +91,9 @@ function parseBalanceEth(balanceRes) {
   const n = typeof b === "string" ? Number(b) : Number(b);
   return Number.isFinite(n) ? n : null;
 }
-
 function shouldSendDailyBalanceUtc(now) {
   if (!isOn("CONCLAVE_NOTIFY_DAILY_BALANCE")) return false;
-  const hour = numEnv("CONCLAVE_DAILY_BALANCE_UTC_HOUR", 12); // 12:00 UTC = 20:00 SGT
+  const hour = numEnv("CONCLAVE_DAILY_BALANCE_UTC_HOUR", 12);
   return now.getUTCHours() === hour && now.getUTCMinutes() === 0;
 }
 
@@ -110,7 +104,6 @@ function phaseWeight(p) {
   if (p === "proposal" || p === "propose") return 10;
   return 0;
 }
-
 function pickDebatesOrdered(debates) {
   const scored = debates.map((d) => {
     const players = Number(d.currentPlayers || d.players || d.participants || 0);
@@ -121,9 +114,11 @@ function pickDebatesOrdered(debates) {
   return scored.map((x) => x.d);
 }
 
-// Extract a debate title / prompt safely from debate objects.
 function debateText(d) {
   const parts = [];
+  if (d?.brief?.theme) parts.push(String(d.brief.theme));
+  if (d?.brief?.description) parts.push(String(d.brief.description));
+  if (d?.brief) parts.push(String(d.brief));
   if (d?.title) parts.push(String(d.title));
   if (d?.topic) parts.push(String(d.topic));
   if (d?.prompt) parts.push(String(d.prompt));
@@ -132,10 +127,8 @@ function debateText(d) {
   return parts.join("\n").trim();
 }
 
-// Simple keyword classifier so we only join debates we can answer without slop.
 function classifyDebate(text) {
   const t = (text || "").toLowerCase();
-
   const has = (arr) => arr.some((w) => t.includes(w));
 
   if (has(["oracle", "attestation", "attest", "data feed", "offchain", "onchain data"])) return "oracle";
@@ -148,13 +141,8 @@ function classifyDebate(text) {
   return "unknown";
 }
 
-// Build a debate-specific token ticker (3-6 chars) from keywords.
-// If unsure, return null to indicate "do not propose a token".
 function buildTicker(text, category) {
   const t = (text || "").toUpperCase();
-
-  // Hard ban: do not default to SMOKE.
-  // Only use SMOKE if the debate is explicitly about Conclave smoke/tokenomics.
   if (t.includes("CONCLAVE") && t.includes("SMOKE")) return "SMOKE";
 
   const maps = {
@@ -165,62 +153,57 @@ function buildTicker(text, category) {
     interop: "XMSG",
     privacy: "ZKPR",
   };
-
   if (maps[category]) return maps[category];
-
   return null;
 }
 
-// Build a real proposal body. Keep it compact enough for an API field.
 function buildProposal(text, category) {
   const brief = (text || "").trim();
   const briefOneLine = brief.split("\n").map((s) => s.trim()).filter(Boolean)[0] || "Debate brief";
-
-  // Always restate the prompt to prove relevance.
   const intro = `Problem (restated): ${snip(briefOneLine, 140)}`;
 
   const templates = {
     oracle: [
-      "Mechanism: Use an optimistic oracle with bonded proposers and challengers. Offchain data is proposed with a bond; anyone can dispute within a fixed window. If disputed, resolution is via a verifiable game: either (a) onchain validity proofs for the data, or (b) a commit-reveal arbitration set where arbitrators must stake and can be slashed for provably inconsistent votes.",
-      "Onchain design: Contracts: DataFeedRegistry, ProposalBondVault, DisputeGame. Proposal includes (data, source commitment, timestamp, merkle commitment). Dispute triggers a dispute game with escalating bond sizes. Finalization writes to registry; slashing distributes to honest side.",
-      "Incentives: Bonds scale with value-at-risk. Honest proposers earn fees; dishonest proposers lose bond. Challengers earn a cut when correct, making monitoring profitable.",
-      "Attack vectors + mitigations: (1) Bribery: require bonds > bribe profit and allow open participation for challengers. (2) Data withholding: multiple proposers per epoch and fallback to last-good value. (3) Sybil challengers: bond requirement per dispute and rate limits per epoch.",
-      "Tradeoffs: Latency due to dispute window, but high security. Can tune window length and bonds per feed.",
+      "Mechanism: Optimistic oracle. Bonded proposer posts data + commitment; anyone can dispute in a window. Dispute triggers a verification game (fraud proof or bonded arbitration) with slashing.",
+      "Onchain design: DataFeedRegistry + BondVault + DisputeGame. Proposals commit to (value, timestamp, merkle/source commitment). Finalization writes to registry; slashing pays honest side.",
+      "Incentives: Bonds scale with value-at-risk. Honest proposers earn fees; dishonest lose bond. Challengers get paid when correct so monitoring is profitable.",
+      "Attacks + mitigations: bribery (bonds + open challengers), withholding (multi-proposer epochs + last-good fallback), griefing (bond per dispute + rate limits).",
+      "Tradeoffs: dispute window adds latency, but security is enforceable without trusted parties.",
     ],
     identity: [
-      "Mechanism: Build a sybil-resistant identity layer using multi-factor proofs: device-bound credentials + social graph attestations + optional zk proofs. Weight actions by reputation that is earned via time, stake, and successful contributions, not one-shot claims.",
-      "Onchain design: IdentityCommitments contract stores commitment hashes. Attesters stake and sign attestations. A zk circuit proves constraints (age, uniqueness, membership) without leaking data. Slashing for attesters caught signing contradictory statements.",
-      "Incentives: Attesters earn fees but are slashed for fraud. Users can build reputation over time. High-risk actions require higher reputation or stake.",
-      "Attack vectors + mitigations: (1) Attester collusion: diversify attesters and raise slashing amounts. (2) Identity farming: time-based maturation + stake lockups. (3) Privacy leaks: store only commitments and use zk proofs for predicates.",
-      "Tradeoffs: Higher complexity and onboarding friction, but reduces sybil attacks materially.",
+      "Mechanism: Sybil resistance via staged reputation: time + stake + verifiable contributions, with optional zk proofs for predicates. No one-shot identity claims.",
+      "Onchain design: Identity commitments + staked attesters + zk verifier. Attesters are slashable for contradictory attestations. Actions gated by reputation tiers.",
+      "Incentives: Attesters earn fees but are slashable. Users earn influence over time. High-risk actions require higher rep or locked stake.",
+      "Attacks + mitigations: collusion (diverse attesters + slashing), farming (maturation + lockups), privacy leaks (commitments + zk predicates).",
+      "Tradeoffs: harder onboarding, but real sybil resistance and credibility.",
     ],
     governance: [
-      "Mechanism: Use a two-house governance model: token-weighted votes plus a reputation or contribution house. Proposals pass only if both houses approve. Add a timelock and an emergency veto with strict constraints.",
-      "Onchain design: GovernorCore + ReputationHouse. Reputation is earned via measurable contributions and decays over time. Votes are snapshot-based. Execution is timelocked with cancellation only under defined conditions.",
-      "Incentives: Prevents whales from dominating while still respecting capital at risk. Contributors gain real influence over time.",
-      "Attack vectors + mitigations: (1) Vote buying: introduce vote escrow with lockups. (2) Governance capture: dual threshold + timelock. (3) Reputation gaming: require onchain verifiable actions and decay.",
-      "Tradeoffs: Slower governance, but higher legitimacy and resilience.",
+      "Mechanism: Two-house governance: token vote + contribution reputation vote. Proposal passes only if both approve. Timelock plus constrained emergency veto.",
+      "Onchain design: GovernorCore + RepHouse. Reputation decays and is earned via onchain verifiable actions. Snapshot voting; timelocked execution.",
+      "Incentives: Limits whale capture while still respecting capital at risk. Contributors gain influence by shipping, not by buying votes.",
+      "Attacks + mitigations: vote buying (lockups), capture (dual thresholds + timelock), rep gaming (decay + verifiable actions).",
+      "Tradeoffs: slower decisions, higher legitimacy and resilience.",
     ],
     markets: [
-      "Mechanism: Use a hybrid AMM with dynamic fees plus an auction-based rebalancing mechanism. For thin liquidity, use batch auctions to reduce MEV and improve price discovery.",
-      "Onchain design: AMM pool contract with volatility-based fee curve. Auction module runs discrete batches for large trades. Optional intent-based order flow reduces sandwiching.",
-      "Incentives: LPs earn higher fees during volatility. Traders get better execution. Searchers are constrained by auctions.",
-      "Attack vectors + mitigations: (1) MEV: batch auctions + private order flow. (2) Oracle manipulation: use TWAP and dispute-able oracle sources. (3) LP dilution: dynamic fee and withdrawal delays.",
-      "Tradeoffs: More complexity, but materially better execution during volatility.",
+      "Mechanism: Hybrid AMM with dynamic fees plus batch auctions for large trades to reduce MEV and improve discovery in thin liquidity.",
+      "Onchain design: Pool with volatility-based fee curve + auction module. Optional intent flow reduces sandwiching; TWAP safeguards for updates.",
+      "Incentives: LPs earn more in volatility; traders get better execution; MEV opportunities are constrained by auctions.",
+      "Attacks + mitigations: MEV (batching), oracle manipulation (TWAP + dispute-able oracle), LP dilution (dynamic fees + withdrawal delay).",
+      "Tradeoffs: more complexity, better execution under stress.",
     ],
     interop: [
-      "Mechanism: Cross-chain messaging using light-client verification where possible, and an optimistic fallback where not. Messages are posted with a bond; fraud proofs can invalidate.",
-      "Onchain design: MessageRouter, LightClientVerifier, OptimisticInbox. Light-client path verifies headers. Optimistic path uses bonded relayers and a dispute window.",
-      "Incentives: Relayers earn fees; fraud provers earn slashed bonds. Security scales with value at risk per route.",
-      "Attack vectors + mitigations: (1) Relay collusion: large bonds + open proving. (2) Reorg risk: confirmation thresholds. (3) DoS: per-sender rate limits and fees.",
-      "Tradeoffs: Latency, but strong security without centralized trust.",
+      "Mechanism: Cross-chain messaging using light clients where possible and optimistic bonded relays otherwise, with fraud proofs and dispute windows.",
+      "Onchain design: Router + LightClientVerifier + OptimisticInbox. Light-client verifies headers. Optimistic path uses bonded relayers and open fraud proving.",
+      "Incentives: Relayers earn fees; fraud provers earn slashed bonds; security scales with route risk.",
+      "Attacks + mitigations: collusion (large bonds + open proving), reorg risk (confirm thresholds), DoS (fees + rate limits).",
+      "Tradeoffs: latency, but strong security without trusted committees.",
     ],
     privacy: [
-      "Mechanism: Use zk proofs for private state transitions with public verifiability. Separate keys for spending vs viewing. Optional selective disclosure for compliance.",
-      "Onchain design: Verifier contract + encrypted state commitments. Users submit proofs that a transition is valid without revealing amounts or recipients. Nullifiers prevent double spends.",
-      "Incentives: Fees fund proof verification; privacy users pay for the added compute. Optional relayers can be paid to hide origin.",
-      "Attack vectors + mitigations: (1) Proof system bugs: upgradeable verifier with audits and timelocks. (2) Metadata leaks: relayers and batching. (3) Spam: fees and deposit requirements.",
-      "Tradeoffs: Higher cost, but privacy and composability improve.",
+      "Mechanism: zk proofs for private state transitions. Separate spend vs view keys. Optional selective disclosure for compliance.",
+      "Onchain design: Verifier + encrypted commitments + nullifiers to prevent double spend. Batch proofs to reduce cost; relayers to hide origin.",
+      "Incentives: Users pay for proof verification; relayers paid to improve privacy; fees fund verifier ops.",
+      "Attacks + mitigations: proof bugs (audits + timelocked upgrades), metadata leaks (batching + relayers), spam (fees + deposits).",
+      "Tradeoffs: higher cost, privacy and composability increase.",
     ],
   };
 
@@ -228,24 +211,102 @@ function buildProposal(text, category) {
   if (!blocks) return null;
 
   const body = [
-    `Title: Practical design for this brief`,
+    "Title: Practical design for this brief",
     intro,
     "",
-    blocks[0],
+    `Mechanism: ${blocks[0]}`,
     "",
-    blocks[1],
+    `Onchain Design: ${blocks[1]}`,
     "",
-    blocks[2],
+    `Incentives: ${blocks[2]}`,
     "",
-    blocks[3],
+    `Attack Vectors + Mitigations: ${blocks[3]}`,
     "",
-    blocks[4],
+    `Tradeoffs: ${blocks[4]}`,
     "",
-    "Why this wins: It directly answers the brief with enforceable incentives, clear onchain components, and explicit failure handling instead of slogans.",
+    "Why this wins: enforceable incentives + explicit failure handling, not slogans.",
   ].join("\n");
 
-  // Keep within a reasonable size.
-  return snip(body, 1200);
+  return snip(body, 2800);
+}
+
+// Try to locate our idea in status.ideas
+function findSelfIdea(ideas, username) {
+  const u = (username || "").trim().toLowerCase();
+  if (!u) return null;
+
+  const keys = ["name", "agentName", "proposer", "proposerName", "createdBy", "createdByName", "author", "authorName", "owner", "ownerName"];
+  for (const idea of ideas || []) {
+    for (const k of keys) {
+      if (idea && idea[k] && String(idea[k]).trim().toLowerCase() === u) return idea;
+    }
+  }
+  return null;
+}
+
+// Flatten comments for scanning
+function extractCommentsFromIdeas(ideas) {
+  const out = [];
+  for (const idea of ideas || []) {
+    const arr = idea?.comments || idea?.commentary || idea?.replies || null;
+    if (Array.isArray(arr)) {
+      for (const c of arr) out.push({ idea, c });
+    }
+  }
+  return out;
+}
+
+function commentAlreadyPosted(comments, marker) {
+  const m = marker.toLowerCase();
+  return comments.some((x) => String(x?.c?.message || x?.c?.text || "").toLowerCase().includes(m));
+}
+
+function detectStrongCriticism(commentsOnSelf) {
+  const text = commentsOnSelf
+    .map((x) => String(x?.c?.message || x?.c?.text || "").toLowerCase())
+    .join("\n");
+
+  const flags = [];
+  if (text.includes("off-topic") || text.includes("off topic")) flags.push("offtopic");
+  if (text.includes("zero mechanism") || text.includes("no mechanism") || text.includes("no design")) flags.push("nomech");
+  if (text.includes("slop") || text.includes("noise")) flags.push("slop");
+  return flags;
+}
+
+// Build a short comment under 280 chars
+function buildCommentForSelf(briefText, category, criticismFlags, marker) {
+  const briefOneLine =
+    (briefText || "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)[0] || "the brief";
+
+  let core = "";
+  if (category === "oracle") core = "Bonded optimistic oracle + dispute window + slashing. Data commits + open challengers. Handles bribery via high bonds and open proving.";
+  else if (category === "identity") core = "Sybil resistance via time+stake reputation, slashable attesters, and zk predicates. High-risk actions gated by rep tiers.";
+  else if (category === "governance") core = "Two-house governance: token votes + contribution reputation. Pass only if both approve. Timelock execution reduces capture.";
+  else if (category === "markets") core = "Hybrid AMM + batch auctions for large flow. Dynamic fees reduce toxic orderflow. Batching cuts MEV and improves discovery.";
+  else if (category === "interop") core = "Light-client messaging where possible; optimistic bonded relays otherwise with fraud proofs. Open proving + slashing gives enforceable security.";
+  else if (category === "privacy") core = "zk state transitions with encrypted commitments + nullifiers. Relayers and batching reduce metadata leaks; fees prevent spam.";
+  else core = "Concrete mechanism + incentives + attack mitigation. No slogans.";
+
+  let prefix = `Re: ${snip(briefOneLine, 60)} `;
+  if (criticismFlags.includes("offtopic")) prefix = "Not off-topic. ";
+  if (criticismFlags.includes("nomech")) prefix = "Here is the mechanism clearly: ";
+
+  let msg = `${prefix}${snip(core, 210)} ${marker}`;
+  if (msg.length > 280) msg = msg.slice(0, 276) + "...";
+  return msg;
+}
+
+// Build a refined description (max 3000 chars) when criticism is strong
+function buildRefinement(text, category) {
+  const proposal = buildProposal(text, category);
+  if (!proposal) return null;
+
+  const add = "\n\nRefinement: Explicitly mapping to the brief constraints (no trusted parties, no multisigs, no reputation dependency). Security comes from bonded incentives, open disputing, and verifiable resolution.";
+  const merged = proposal + add;
+  return snip(merged, 3000);
 }
 
 function buildJoinBodyForDebate(d) {
@@ -253,24 +314,15 @@ function buildJoinBodyForDebate(d) {
   const text = debateText(d);
   const category = classifyDebate(text);
 
-  // If we cannot classify, we do not join. Avoid slop.
   if (category === "unknown") return { skip: true, reason: "unknown_topic" };
 
   const proposal = buildProposal(text, category);
   if (!proposal) return { skip: true, reason: "no_template" };
 
   const ticker = buildTicker(text, category);
-  // If ticker is null, we still must provide something. Use a safe generic that is not SMOKE.
   const finalTicker = (ticker || "IDEA").trim().toUpperCase();
 
-  // Conclave join body fields: name, ticker, description
-  // We put the high-signal proposal into description so it is not a one-liner.
-  const joinBody = {
-    name,
-    ticker: finalTicker,
-    description: proposal,
-  };
-
+  const joinBody = { name, ticker: finalTicker, description: proposal };
   return { skip: false, joinBody, category, ticker: finalTicker };
 }
 
@@ -279,19 +331,14 @@ function buildAutoAllocations(ideas, selfPct) {
   const list = (ideas || []).filter((x) => x && (x.ideaId || x.id) && x.ticker);
   if (list.length < 2) return null;
 
-  // Self idea ticker should be your real idea ticker if you have one, otherwise do not self-bias.
   const selfTicker = env("CONCLAVE_SELF_TICKER", "").trim().toUpperCase();
   const selfIdea = selfTicker ? list.find((x) => String(x.ticker || "").toUpperCase() === selfTicker) : null;
 
   const allocs = [];
-
-  if (selfIdea && pctSelf > 0) {
-    allocs.push({ ideaId: String(selfIdea.ideaId || selfIdea.id), percentage: pctSelf });
-  }
+  if (selfIdea && pctSelf > 0) allocs.push({ ideaId: String(selfIdea.ideaId || selfIdea.id), percentage: pctSelf });
 
   const remaining = 100 - allocs.reduce((s, a) => s + a.percentage, 0);
   const others = list.filter((x) => x !== selfIdea);
-
   if (others.length < 2 && allocs.length === 0) return null;
 
   const k = Math.min(4, Math.max(2, others.length));
@@ -299,11 +346,10 @@ function buildAutoAllocations(ideas, selfPct) {
   const base = Math.floor(remaining / k);
   let used = 0;
 
-  for (let i = 0; i < slice.length; i++) {
-    const id = String(slice[i].ideaId || slice[i].id);
-    const pct = base;
-    used += pct;
-    allocs.push({ ideaId: id, percentage: pct });
+  for (const it of slice) {
+    const id = String(it.ideaId || it.id);
+    used += base;
+    allocs.push({ ideaId: id, percentage: base });
   }
 
   let rem2 = remaining - used;
@@ -333,7 +379,7 @@ function buildAutoAllocations(ideas, selfPct) {
   const now = nowUtc();
   if (debug) console.error(`[conclave_tick] start ${now.toISOString()}`);
 
-  // Always fetch balance, but only message it once daily.
+  // Balance (message once per day only)
   const balanceRes = await httpJson("GET", "/balance", conclaveToken, null);
   const balEth = balanceRes.status === 200 ? parseBalanceEth(balanceRes) : null;
 
@@ -352,13 +398,13 @@ function buildAutoAllocations(ideas, selfPct) {
 
     if (lowBal !== null && balEth !== null && balEth < lowBal) {
       const topUp = Math.max(0, 0.01 - balEth);
-      msg += `\n⚠️ Low balance: below ${formatEth(lowBal)}. Suggested top-up: ${formatEth(topUp)} ETH to reach 0.010000.`;
+      msg += `\nLow balance: below ${formatEth(lowBal)}. Top-up: ${formatEth(topUp)} ETH to reach 0.010000.`;
     }
 
     await tgSend(tgBotToken, tgChatId, msg);
   }
 
-  // Main status
+  // Status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
 
@@ -370,10 +416,79 @@ function buildAutoAllocations(ideas, selfPct) {
   const st = statusRes.json;
   const inGame = !!(st.inGame ?? st.inDebate);
   const phase = String(st.phase || "").toLowerCase();
+  const ideas = st.ideas || [];
+  const username = env("CONCLAVE_USERNAME", "DiamondHandsDig").trim();
 
-  if (debug) console.error(`[conclave_tick] inGame=${inGame} phase=${phase}`);
+  if (debug) console.error(`[conclave_tick] inGame=${inGame} phase=${phase} ideas=${ideas.length}`);
 
-  // Not in game: try to join a debate we can answer without slop.
+  // If in-game and debating, comment/refine
+  if (inGame && (phase === "debate" || phase === "proposal" || phase === "propose")) {
+    const selfIdea = findSelfIdea(ideas, username);
+    if (selfIdea && (selfIdea.ticker || selfIdea.ideaId || selfIdea.id)) {
+      const selfTicker = String(selfIdea.ticker || "").toUpperCase();
+      const selfIdeaId = String(selfIdea.ideaId || selfIdea.id || "");
+
+      const allComments = extractCommentsFromIdeas(ideas);
+      const commentsOnSelf = allComments.filter((x) => String(x?.idea?.ticker || "").toUpperCase() === selfTicker);
+
+      const marker = `[neo:${now.toISOString().slice(0, 16)}Z]`; // minute-level marker
+      const already = commentAlreadyPosted(commentsOnSelf, marker);
+      const flags = detectStrongCriticism(commentsOnSelf);
+
+      // Build a brief text from idea description as fallback
+      const briefText = String(st.brief?.theme || st.brief?.description || selfIdea.description || "");
+      const category = classifyDebate(briefText);
+
+      // Refine once if strong criticism present and we can
+      // Stateless guard: only refine if we have not refined in the last 60 minutes by checking our own description marker.
+      const refineMarker = `[neo-refine:${now.toISOString().slice(0, 13)}Z]`; // hour marker
+      const descLower = String(selfIdea.description || "").toLowerCase();
+      const refinedThisHour = descLower.includes(refineMarker.toLowerCase());
+
+      if (!refinedThisHour && flags.length > 0 && selfIdeaId) {
+        const refined = buildRefinement(briefText, category);
+        if (refined) {
+          const refineBody = { ideaId: selfIdeaId, description: `${refined}\n\n${refineMarker}` };
+          const refineRes = await httpJson("POST", "/refine", conclaveToken, refineBody);
+
+          if (debug) console.error(`[conclave_tick] /refine ${refineRes.status}`);
+          if (refineRes.status !== 200) {
+            await tgSend(tgBotToken, tgChatId, `Conclave ERR refine ${refineRes.status} ${snip(refineRes.text)}`);
+            process.exit(0);
+          }
+        }
+      }
+
+      // Comment once per tick window
+      if (!already && selfTicker) {
+        const msg = buildCommentForSelf(briefText, category, flags, marker);
+
+        // replyTo is optional. If we can find a most recent commentId, reply to that.
+        const last = commentsOnSelf
+          .map((x) => x.c)
+          .filter(Boolean)
+          .slice(-1)[0];
+
+        const replyTo = last && (last.id || last.commentId) ? String(last.id || last.commentId) : undefined;
+
+        const commentBody = replyTo
+          ? { ticker: selfTicker, message: msg, replyTo }
+          : { ticker: selfTicker, message: msg };
+
+        const commentRes = await httpJson("POST", "/comment", conclaveToken, commentBody);
+        if (debug) console.error(`[conclave_tick] /comment ${commentRes.status}`);
+
+        if (commentRes.status !== 200) {
+          await tgSend(tgBotToken, tgChatId, `Conclave ERR comment ${commentRes.status} ${snip(commentRes.text)}`);
+          process.exit(0);
+        }
+      }
+    }
+
+    process.exit(0);
+  }
+
+  // Not in game: try to join a debate we can answer without slop
   if (!inGame) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
@@ -384,15 +499,12 @@ function buildAutoAllocations(ideas, selfPct) {
     }
 
     const debates = debatesRes.json.debates || [];
-    if (debug) console.error(`[conclave_tick] debates=${debates.length}`);
     if (debates.length === 0) process.exit(0);
 
     const ordered = pickDebatesOrdered(debates);
     const maxAttempts = Math.min(6, ordered.length);
 
     let tried = 0;
-    let skipped = 0;
-    let fullOrClosed = 0;
 
     for (let idx = 0; idx < ordered.length && tried < maxAttempts; idx++) {
       const d = ordered[idx];
@@ -402,50 +514,33 @@ function buildAutoAllocations(ideas, selfPct) {
       if (p === "ended" || p === "results") continue;
 
       const built = buildJoinBodyForDebate(d);
-      if (built.skip) {
-        skipped += 1;
-        continue;
-      }
+      if (built.skip) continue;
 
       tried += 1;
-      if (debug) console.error(`[conclave_tick] join attempt=${tried}/${maxAttempts} id=${d.id} category=${built.category} ticker=${built.ticker}`);
 
       const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, built.joinBody);
       if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
 
       if (joinRes.status === 200) {
-        await tgSend(
-          tgBotToken,
-          tgChatId,
-          `Conclave ACT joined debate id=${d.id} | ticker=${built.ticker} | category=${built.category}`
-        );
+        await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id} | ticker=${built.ticker} | category=${built.category}`);
         process.exit(0);
       }
 
       const errMsg = safeErrMsg(joinRes).toLowerCase();
       const isFull = errMsg.includes("full");
       const notAccepting = errMsg.includes("not accepting") || errMsg.includes("closed") || errMsg.includes("ended");
-
-      if (isFull || notAccepting) {
-        fullOrClosed += 1;
-        continue;
-      }
+      if (isFull || notAccepting) continue;
 
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
       process.exit(0);
     }
 
-    if (debug) {
-      console.error(`[conclave_tick] join finished tried=${tried} skipped=${skipped} fullOrClosed=${fullOrClosed}`);
-    }
-
     process.exit(0);
   }
 
-  // In game
+  // Allocation phase
   if (phase === "allocation") {
     const selfPct = numEnv("CONCLAVE_SELF_ALLOC_PCT", 5);
-    const ideas = st.ideas || [];
     const allocBody = buildAutoAllocations(ideas, selfPct);
 
     if (!allocBody) {
@@ -465,8 +560,6 @@ function buildAutoAllocations(ideas, selfPct) {
     process.exit(0);
   }
 
-  // Debate/proposal phases: do nothing here because we do not know Conclave's proposal submission endpoint safely.
-  // The join payload now contains a real proposal instead of a one-liner, which is the main fix.
   process.exit(0);
 })().catch(async (e) => {
   const msg = e && e.stack ? e.stack : String(e);
