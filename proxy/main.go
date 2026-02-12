@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	cookieName = "openclaw_auth"
+	cookieName   = "openclaw_auth"
 	cookieMaxAge = 30 * 24 * 60 * 60 // 30 days
 )
 
@@ -52,6 +53,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envDurationMs(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		log.Printf("Invalid %s=%q; using default %s", key, raw, fallback)
+		return fallback
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func main() {
@@ -279,8 +293,12 @@ func streamLog(prefix string, r io.Reader) {
 
 func pollGatewayHealth() {
 	client := &http.Client{Timeout: 2 * time.Second}
+	startupInterval := envDurationMs("OPENCLAW_HEALTH_POLL_STARTUP_MS", 1*time.Second)
+	steadyInterval := envDurationMs("OPENCLAW_HEALTH_POLL_STEADY_MS", 5*time.Second)
+	nextInterval := startupInterval
+
 	for {
-		time.Sleep(1 * time.Second)
+		time.Sleep(nextInterval)
 		resp, err := client.Get("http://127.0.0.1:" + gatewayPort + "/openclaw")
 		if err == nil {
 			resp.Body.Close()
@@ -289,8 +307,11 @@ func pollGatewayHealth() {
 					log.Println("Gateway is ready")
 					gatewayReady.Store(true)
 				}
+				nextInterval = steadyInterval
+				continue
 			}
 		}
+		nextInterval = startupInterval
 	}
 }
 
