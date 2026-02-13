@@ -398,6 +398,8 @@ function buildAutoAllocations(ideas, selfPct) {
 
 const tickStartedAtMs = Date.now();
 let tickEnded = false;
+const tickStatePath = env("OPENCLAW_TICK_STATE_PATH", "/data/tick_state.json");
+let tickFailedState = null;
 const tickStats = {
   debatesFetched: 0,
   debatesJoined: 0,
@@ -415,14 +417,47 @@ const tickHttpStatus = {
 };
 console.log(`tick_start timestamp=${new Date(tickStartedAtMs).toISOString()}`);
 
-function tickEnd(status) {
+async function persistTickState(summary, failedState) {
+  try {
+    const fs = await import("node:fs/promises");
+    let state = {};
+    try {
+      const raw = await fs.readFile(tickStatePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") state = parsed;
+    } catch {}
+
+    const next = { ...state, last_tick_summary: summary };
+    if (failedState) next.last_tick_failed = failedState;
+    await fs.writeFile(tickStatePath, JSON.stringify(next), "utf8");
+  } catch {}
+}
+
+async function tickEnd(status) {
   if (tickEnded) return;
   tickEnded = true;
   const durationMs = Date.now() - tickStartedAtMs;
   const statusValue = (v) => (v === null || v === undefined ? "na" : v);
+  const summary = {
+    timestamp: new Date().toISOString(),
+    status,
+    durationMs,
+    debatesFetched: tickStats.debatesFetched,
+    debatesJoined: tickStats.debatesJoined,
+    allocationsAttempted: tickStats.allocationsAttempted,
+    commentsPosted: tickStats.commentsPosted,
+    status_balance: statusValue(tickHttpStatus.balance),
+    status_status: statusValue(tickHttpStatus.status),
+    status_debates: statusValue(tickHttpStatus.debates),
+    status_join: statusValue(tickHttpStatus.join),
+    status_refine: statusValue(tickHttpStatus.refine),
+    status_comment: statusValue(tickHttpStatus.comment),
+    status_allocate: statusValue(tickHttpStatus.allocate),
+  };
   console.log(
     `tick_summary debatesFetched=${tickStats.debatesFetched} debatesJoined=${tickStats.debatesJoined} allocationsAttempted=${tickStats.allocationsAttempted} commentsPosted=${tickStats.commentsPosted} status_balance=${statusValue(tickHttpStatus.balance)} status_status=${statusValue(tickHttpStatus.status)} status_debates=${statusValue(tickHttpStatus.debates)} status_join=${statusValue(tickHttpStatus.join)} status_refine=${statusValue(tickHttpStatus.refine)} status_comment=${statusValue(tickHttpStatus.comment)} status_allocate=${statusValue(tickHttpStatus.allocate)}`
   );
+  await persistTickState(summary, tickFailedState);
   console.log(`tick_end durationMs=${durationMs} status=${status}`);
 }
 
@@ -470,7 +505,7 @@ function tickEnd(status) {
 
   if (statusRes.status !== 200 || !statusRes.json) {
     await tgSend(tgBotToken, tgChatId, `Conclave ERR /status ${statusRes.status} ${snip(statusRes.text)}`);
-    tickEnd("ok");
+    await tickEnd("ok");
     process.exit(0);
   }
 
@@ -516,7 +551,7 @@ function tickEnd(status) {
           if (debug) console.error(`[conclave_tick] /refine ${refineRes.status}`);
           if (refineRes.status !== 200) {
             await tgSend(tgBotToken, tgChatId, `Conclave ERR refine ${refineRes.status} ${snip(refineRes.text)}`);
-            tickEnd("ok");
+            await tickEnd("ok");
             process.exit(0);
           }
         }
@@ -544,14 +579,14 @@ function tickEnd(status) {
 
         if (commentRes.status !== 200) {
           await tgSend(tgBotToken, tgChatId, `Conclave ERR comment ${commentRes.status} ${snip(commentRes.text)}`);
-          tickEnd("ok");
+          await tickEnd("ok");
           process.exit(0);
         }
         tickStats.commentsPosted += 1;
       }
     }
 
-    tickEnd("ok");
+    await tickEnd("ok");
     process.exit(0);
   }
 
@@ -563,14 +598,14 @@ function tickEnd(status) {
 
     if (debatesRes.status !== 200 || !debatesRes.json) {
       await tgSend(tgBotToken, tgChatId, `Conclave ERR /debates ${debatesRes.status} ${snip(debatesRes.text)}`);
-      tickEnd("ok");
+      await tickEnd("ok");
       process.exit(0);
     }
 
     const debates = debatesRes.json.debates || [];
     tickStats.debatesFetched += debates.length;
     if (debates.length === 0) {
-      tickEnd("ok");
+      await tickEnd("ok");
       process.exit(0);
     }
 
@@ -598,7 +633,7 @@ function tickEnd(status) {
       if (joinRes.status === 200) {
         tickStats.debatesJoined += 1;
         await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id} | ticker=${built.ticker} | category=${built.category}`);
-        tickEnd("ok");
+        await tickEnd("ok");
         process.exit(0);
       }
 
@@ -608,11 +643,11 @@ function tickEnd(status) {
       if (isFull || notAccepting) continue;
 
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
-      tickEnd("ok");
+      await tickEnd("ok");
       process.exit(0);
     }
 
-    tickEnd("ok");
+    await tickEnd("ok");
     process.exit(0);
   }
 
@@ -623,7 +658,7 @@ function tickEnd(status) {
 
     if (!allocBody) {
       await tgSend(tgBotToken, tgChatId, "Conclave ERR: allocation phase but could not build valid allocations.");
-      tickEnd("ok");
+      await tickEnd("ok");
       process.exit(0);
     }
 
@@ -634,22 +669,27 @@ function tickEnd(status) {
 
     if (allocRes.status === 200) {
       await tgSend(tgBotToken, tgChatId, `Conclave ACT allocated (self=${Math.min(60, Math.floor(selfPct))}%).`);
-      tickEnd("ok");
+      await tickEnd("ok");
       process.exit(0);
     }
 
     await tgSend(tgBotToken, tgChatId, `Conclave ERR allocate ${allocRes.status} ${snip(allocRes.text)}`);
-    tickEnd("ok");
+    await tickEnd("ok");
     process.exit(0);
   }
 
-  tickEnd("ok");
+  await tickEnd("ok");
   process.exit(0);
 })().catch(async (e) => {
   const errorType = e && e.name ? e.name : typeof e;
   const rawMessage = e && e.message ? e.message : String(e);
   const cleanMessage = String(rawMessage).replace(/\s+/g, " ").trim();
   console.error(`tick_failed errorType=${errorType} message=${snip(cleanMessage, 1000)}`);
+  tickFailedState = {
+    timestamp: new Date().toISOString(),
+    errorType,
+    message: snip(cleanMessage, 1000),
+  };
 
   try {
     const tgBotToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -659,6 +699,6 @@ function tickEnd(status) {
     }
   } catch {}
 
-  tickEnd("failed");
+  await tickEnd("failed");
   return;
 });
