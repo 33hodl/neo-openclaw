@@ -2,6 +2,8 @@ services:
   - type: web
     name: openclaw
     runtime: docker
+    rootDir: .
+    dockerfilePath: Dockerfile
     plan: standard
     healthCheckPath: /health
     envVars:
@@ -42,6 +44,8 @@ services:
   - type: worker
     name: conclave-worker
     runtime: docker
+    rootDir: .
+    dockerfilePath: Dockerfile
     plan: standard
     startCommand: node /app/conclave_tick.js --mode=loop
     envVars:
