@@ -30,12 +30,13 @@ const (
 )
 
 var (
-	port          = envOr("PORT", "10000")
-	stateDir      = envOr("OPENCLAW_STATE_DIR", "/data/.openclaw")
-	workspaceDir  = envOr("OPENCLAW_WORKSPACE_DIR", "/data/workspace")
-	tickStatePath = envOr("OPENCLAW_TICK_STATE_PATH", "/data/tick_state.json")
-	gatewayToken  = os.Getenv("OPENCLAW_GATEWAY_TOKEN")
-	gatewayPort   = "18789"
+	port                = envOr("PORT", "10000")
+	stateDir            = envOr("OPENCLAW_STATE_DIR", "/data/.openclaw")
+	workspaceDir        = envOr("OPENCLAW_WORKSPACE_DIR", "/data/workspace")
+	tickStatePath       = envOr("OPENCLAW_TICK_STATE_PATH", "/data/tick_state.json")
+	tickStateWriteToken = os.Getenv("OPENCLAW_TICK_STATE_WRITE_TOKEN")
+	gatewayToken        = os.Getenv("OPENCLAW_GATEWAY_TOKEN")
+	gatewayPort         = "18789"
 
 	gatewayReady atomic.Bool
 	gatewayCmd   *exec.Cmd
@@ -94,6 +95,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/tick/status", handleTickStatus)
+	mux.HandleFunc("/tick/state", handleTickStateWrite)
 	mux.HandleFunc("/auth", handleAuth)
 	mux.HandleFunc("/", handleProxy)
 
@@ -340,6 +342,43 @@ func handleTickStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write(body)
+}
+
+func handleTickStateWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	token := strings.TrimSpace(strings.TrimPrefix(auth, prefix))
+	if tickStateWriteToken == "" || !strings.HasPrefix(auth, prefix) || token != tickStateWriteToken {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid body"}`))
+		return
+	}
+
+	if err := os.WriteFile(tickStatePath, body, 0644); err != nil {
+		log.Printf("Tick state write error: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"tick state unavailable"}`))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"ok":true}`))
 }
 
 // --- Rate limiting ---
