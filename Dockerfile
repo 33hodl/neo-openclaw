@@ -24,10 +24,14 @@ COPY ui/package.json ./ui/package.json
 COPY patches ./patches
 COPY scripts ./scripts
 
+ENV CI=1
+ENV PNPM_WORKSPACE_CONCURRENCY=1
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
 RUN pnpm install --frozen-lockfile
 
 COPY . .
-RUN pnpm build
+RUN set -eux; pnpm --version; node -v; pnpm build --reporter=append-only --loglevel=debug
 
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
