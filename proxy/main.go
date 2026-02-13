@@ -30,11 +30,12 @@ const (
 )
 
 var (
-	port         = envOr("PORT", "10000")
-	stateDir     = envOr("OPENCLAW_STATE_DIR", "/data/.openclaw")
-	workspaceDir = envOr("OPENCLAW_WORKSPACE_DIR", "/data/workspace")
-	gatewayToken = os.Getenv("OPENCLAW_GATEWAY_TOKEN")
-	gatewayPort  = "18789"
+	port          = envOr("PORT", "10000")
+	stateDir      = envOr("OPENCLAW_STATE_DIR", "/data/.openclaw")
+	workspaceDir  = envOr("OPENCLAW_WORKSPACE_DIR", "/data/workspace")
+	tickStatePath = envOr("OPENCLAW_TICK_STATE_PATH", "/data/tick_state.json")
+	gatewayToken  = os.Getenv("OPENCLAW_GATEWAY_TOKEN")
+	gatewayPort   = "18789"
 
 	gatewayReady atomic.Bool
 	gatewayCmd   *exec.Cmd
@@ -92,6 +93,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/tick/status", handleTickStatus)
 	mux.HandleFunc("/auth", handleAuth)
 	mux.HandleFunc("/", handleProxy)
 
@@ -321,6 +323,23 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	ready := gatewayReady.Load()
 	fmt.Fprintf(w, `{"ok":%t,"gateway":%t}`, ready, ready)
+}
+
+func handleTickStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	body, err := os.ReadFile(tickStatePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"tick state not found"}`))
+			return
+		}
+		log.Printf("Tick status read error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"tick state unavailable"}`))
+		return
+	}
+	w.Write(body)
 }
 
 // --- Rate limiting ---
