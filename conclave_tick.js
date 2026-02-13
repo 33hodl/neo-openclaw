@@ -40,13 +40,40 @@ function snip(s, n = 220) {
   return str.length > n ? str.slice(0, n) + "..." : str;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url, opts, { retries = 3, baseDelayMs = 500 } = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.status >= 500 && attempt < retries) {
+        const backoff = baseDelayMs * (2 ** attempt);
+        const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(baseDelayMs / 2)));
+        await sleep(backoff + jitter);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= retries) throw err;
+      const backoff = baseDelayMs * (2 ** attempt);
+      const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(baseDelayMs / 2)));
+      await sleep(backoff + jitter);
+    }
+  }
+  throw lastErr || new Error("FETCH_RETRY_EXHAUSTED");
+}
+
 async function httpJson(method, path, token, bodyObj) {
   const url = `${API_BASE}${path}`;
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   const opts = { method, headers };
   if (bodyObj !== undefined && bodyObj !== null) opts.body = JSON.stringify(bodyObj);
 
-  const res = await fetch(url, opts);
+  const res = await fetchWithRetry(url, opts, { retries: 3, baseDelayMs: 500 });
   const text = await res.text();
   let json = null;
   try {
@@ -369,6 +396,17 @@ function buildAutoAllocations(ideas, selfPct) {
   return { allocations: allocs };
 }
 
+const tickStartedAtMs = Date.now();
+let tickEnded = false;
+console.log(`tick_start timestamp=${new Date(tickStartedAtMs).toISOString()}`);
+
+function tickEnd(status) {
+  if (tickEnded) return;
+  tickEnded = true;
+  const durationMs = Date.now() - tickStartedAtMs;
+  console.log(`tick_end durationMs=${durationMs} status=${status}`);
+}
+
 (async () => {
   const debug = isOn("CONCLAVE_TICK_DEBUG");
 
@@ -410,6 +448,7 @@ function buildAutoAllocations(ideas, selfPct) {
 
   if (statusRes.status !== 200 || !statusRes.json) {
     await tgSend(tgBotToken, tgChatId, `Conclave ERR /status ${statusRes.status} ${snip(statusRes.text)}`);
+    tickEnd("ok");
     process.exit(0);
   }
 
@@ -454,6 +493,7 @@ function buildAutoAllocations(ideas, selfPct) {
           if (debug) console.error(`[conclave_tick] /refine ${refineRes.status}`);
           if (refineRes.status !== 200) {
             await tgSend(tgBotToken, tgChatId, `Conclave ERR refine ${refineRes.status} ${snip(refineRes.text)}`);
+            tickEnd("ok");
             process.exit(0);
           }
         }
@@ -480,11 +520,13 @@ function buildAutoAllocations(ideas, selfPct) {
 
         if (commentRes.status !== 200) {
           await tgSend(tgBotToken, tgChatId, `Conclave ERR comment ${commentRes.status} ${snip(commentRes.text)}`);
+          tickEnd("ok");
           process.exit(0);
         }
       }
     }
 
+    tickEnd("ok");
     process.exit(0);
   }
 
@@ -495,11 +537,15 @@ function buildAutoAllocations(ideas, selfPct) {
 
     if (debatesRes.status !== 200 || !debatesRes.json) {
       await tgSend(tgBotToken, tgChatId, `Conclave ERR /debates ${debatesRes.status} ${snip(debatesRes.text)}`);
+      tickEnd("ok");
       process.exit(0);
     }
 
     const debates = debatesRes.json.debates || [];
-    if (debates.length === 0) process.exit(0);
+    if (debates.length === 0) {
+      tickEnd("ok");
+      process.exit(0);
+    }
 
     const ordered = pickDebatesOrdered(debates);
     const maxAttempts = Math.min(6, ordered.length);
@@ -523,6 +569,7 @@ function buildAutoAllocations(ideas, selfPct) {
 
       if (joinRes.status === 200) {
         await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id} | ticker=${built.ticker} | category=${built.category}`);
+        tickEnd("ok");
         process.exit(0);
       }
 
@@ -532,9 +579,11 @@ function buildAutoAllocations(ideas, selfPct) {
       if (isFull || notAccepting) continue;
 
       await tgSend(tgBotToken, tgChatId, `Conclave ERR join ${joinRes.status} id=${d.id} ${snip(joinRes.text)}`);
+      tickEnd("ok");
       process.exit(0);
     }
 
+    tickEnd("ok");
     process.exit(0);
   }
 
@@ -545,6 +594,7 @@ function buildAutoAllocations(ideas, selfPct) {
 
     if (!allocBody) {
       await tgSend(tgBotToken, tgChatId, "Conclave ERR: allocation phase but could not build valid allocations.");
+      tickEnd("ok");
       process.exit(0);
     }
 
@@ -553,28 +603,31 @@ function buildAutoAllocations(ideas, selfPct) {
 
     if (allocRes.status === 200) {
       await tgSend(tgBotToken, tgChatId, `Conclave ACT allocated (self=${Math.min(60, Math.floor(selfPct))}%).`);
+      tickEnd("ok");
       process.exit(0);
     }
 
     await tgSend(tgBotToken, tgChatId, `Conclave ERR allocate ${allocRes.status} ${snip(allocRes.text)}`);
+    tickEnd("ok");
     process.exit(0);
   }
 
+  tickEnd("ok");
   process.exit(0);
 })().catch(async (e) => {
-  const msg = e && e.stack ? e.stack : String(e);
-  console.error("Conclave tick failed:", msg);
+  const errorType = e && e.name ? e.name : typeof e;
+  const rawMessage = e && e.message ? e.message : String(e);
+  const cleanMessage = String(rawMessage).replace(/\s+/g, " ").trim();
+  console.error(`tick_failed errorType=${errorType} message=${snip(cleanMessage, 1000)}`);
 
   try {
     const tgBotToken = process.env.TELEGRAM_BOT_TOKEN;
     const tgChatId = process.env.TELEGRAM_CHAT_ID;
     if (tgBotToken && tgChatId) {
-      await tgSend(tgBotToken, tgChatId, `Conclave ERR tick failed:\n${snip(msg, 3500)}`);
+      await tgSend(tgBotToken, tgChatId, `Conclave ERR tick failed:\n${snip(cleanMessage, 3500)}`);
     }
-  } catch (err2) {
-    const msg2 = err2 && err2.stack ? err2.stack : String(err2);
-    console.error("Also failed to send Telegram error:", msg2);
-  }
+  } catch {}
 
-  process.exit(1);
+  tickEnd("failed");
+  return;
 });
