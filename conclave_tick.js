@@ -398,12 +398,31 @@ function buildAutoAllocations(ideas, selfPct) {
 
 const tickStartedAtMs = Date.now();
 let tickEnded = false;
+const tickStats = {
+  debatesFetched: 0,
+  debatesJoined: 0,
+  allocationsAttempted: 0,
+  commentsPosted: 0,
+};
+const tickHttpStatus = {
+  balance: null,
+  status: null,
+  debates: null,
+  join: null,
+  refine: null,
+  comment: null,
+  allocate: null,
+};
 console.log(`tick_start timestamp=${new Date(tickStartedAtMs).toISOString()}`);
 
 function tickEnd(status) {
   if (tickEnded) return;
   tickEnded = true;
   const durationMs = Date.now() - tickStartedAtMs;
+  const statusValue = (v) => (v === null || v === undefined ? "na" : v);
+  console.log(
+    `tick_summary debatesFetched=${tickStats.debatesFetched} debatesJoined=${tickStats.debatesJoined} allocationsAttempted=${tickStats.allocationsAttempted} commentsPosted=${tickStats.commentsPosted} status_balance=${statusValue(tickHttpStatus.balance)} status_status=${statusValue(tickHttpStatus.status)} status_debates=${statusValue(tickHttpStatus.debates)} status_join=${statusValue(tickHttpStatus.join)} status_refine=${statusValue(tickHttpStatus.refine)} status_comment=${statusValue(tickHttpStatus.comment)} status_allocate=${statusValue(tickHttpStatus.allocate)}`
+  );
   console.log(`tick_end durationMs=${durationMs} status=${status}`);
 }
 
@@ -419,12 +438,14 @@ function tickEnd(status) {
 
   // Balance (message once per day only)
   const balanceRes = await httpJson("GET", "/balance", conclaveToken, null);
+  tickHttpStatus.balance = balanceRes.status;
   const balEth = balanceRes.status === 200 ? parseBalanceEth(balanceRes) : null;
 
   if (shouldSendDailyBalanceUtc(now)) {
     const lowBal = numEnv("CONCLAVE_LOW_BALANCE_ETH", null);
 
     const statusForSummary = await httpJson("GET", "/status", conclaveToken, null);
+    tickHttpStatus.status = statusForSummary.status;
     const sj = statusForSummary.json || {};
     const inGame = !!(sj.inGame ?? sj.inDebate ?? sj.inGame === true);
     const phase = String(sj.phase || "").toLowerCase() || "unknown";
@@ -444,6 +465,7 @@ function tickEnd(status) {
 
   // Status
   const statusRes = await httpJson("GET", "/status", conclaveToken, null);
+  tickHttpStatus.status = statusRes.status;
   if (debug) console.error(`[conclave_tick] /status ${statusRes.status}`);
 
   if (statusRes.status !== 200 || !statusRes.json) {
@@ -489,6 +511,7 @@ function tickEnd(status) {
         if (refined) {
           const refineBody = { ideaId: selfIdeaId, description: `${refined}\n\n${refineMarker}` };
           const refineRes = await httpJson("POST", "/refine", conclaveToken, refineBody);
+          tickHttpStatus.refine = refineRes.status;
 
           if (debug) console.error(`[conclave_tick] /refine ${refineRes.status}`);
           if (refineRes.status !== 200) {
@@ -516,6 +539,7 @@ function tickEnd(status) {
           : { ticker: selfTicker, message: msg };
 
         const commentRes = await httpJson("POST", "/comment", conclaveToken, commentBody);
+        tickHttpStatus.comment = commentRes.status;
         if (debug) console.error(`[conclave_tick] /comment ${commentRes.status}`);
 
         if (commentRes.status !== 200) {
@@ -523,6 +547,7 @@ function tickEnd(status) {
           tickEnd("ok");
           process.exit(0);
         }
+        tickStats.commentsPosted += 1;
       }
     }
 
@@ -533,6 +558,7 @@ function tickEnd(status) {
   // Not in game: try to join a debate we can answer without slop
   if (!inGame) {
     const debatesRes = await httpJson("GET", "/debates", conclaveToken, null);
+    tickHttpStatus.debates = debatesRes.status;
     if (debug) console.error(`[conclave_tick] /debates ${debatesRes.status}`);
 
     if (debatesRes.status !== 200 || !debatesRes.json) {
@@ -542,6 +568,7 @@ function tickEnd(status) {
     }
 
     const debates = debatesRes.json.debates || [];
+    tickStats.debatesFetched += debates.length;
     if (debates.length === 0) {
       tickEnd("ok");
       process.exit(0);
@@ -565,9 +592,11 @@ function tickEnd(status) {
       tried += 1;
 
       const joinRes = await httpJson("POST", `/debates/${d.id}/join`, conclaveToken, built.joinBody);
+      tickHttpStatus.join = joinRes.status;
       if (debug) console.error(`[conclave_tick] join ${joinRes.status} id=${d.id}`);
 
       if (joinRes.status === 200) {
+        tickStats.debatesJoined += 1;
         await tgSend(tgBotToken, tgChatId, `Conclave ACT joined debate id=${d.id} | ticker=${built.ticker} | category=${built.category}`);
         tickEnd("ok");
         process.exit(0);
@@ -599,6 +628,8 @@ function tickEnd(status) {
     }
 
     const allocRes = await httpJson("POST", "/allocate", conclaveToken, allocBody);
+    tickStats.allocationsAttempted += 1;
+    tickHttpStatus.allocate = allocRes.status;
     if (debug) console.error(`[conclave_tick] /allocate ${allocRes.status}`);
 
     if (allocRes.status === 200) {
