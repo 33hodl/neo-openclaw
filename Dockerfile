@@ -1,42 +1,42 @@
-# Global ARG for use in FROM instructions
-ARG OPENCLAW_VERSION=2026.2.9
+FROM node:22-bookworm
 
-# Build Go proxy
-FROM golang:1.22-bookworm AS proxy-builder
+# Install Bun (required for build scripts)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
 
-WORKDIR /proxy
-COPY proxy/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /proxy-bin .
+RUN corepack enable
 
+WORKDIR /app
 
-# Extend pre-built OpenClaw with our auth proxy
-FROM alpine/openclaw:${OPENCLAW_VERSION}
+ARG OPENCLAW_DOCKER_APT_PACKAGES=""
+RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
+      apt-get clean && \
+      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+    fi
 
-# Base image ends with USER node; switch to root for setup
-USER root
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
 
-# Add packages for openclaw agent operations
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  ripgrep \
-  && rm -rf /var/lib/apt/lists/*
+RUN pnpm install --frozen-lockfile
 
-# Add proxy
-COPY --from=proxy-builder /proxy-bin /usr/local/bin/proxy
+COPY . .
+RUN pnpm build
 
-# Copy your cron script into the container at a stable path
-COPY conclave_tick.js /app/conclave_tick.js
+# Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:build
 
-# Make sure the non-root node user can read it
-RUN chown node:node /app/conclave_tick.js
+ENV NODE_ENV=production
 
-# Create CLI wrapper (openclaw code is at /app/dist/index.js in base image)
-RUN printf '#!/bin/sh\nexec node /app/dist/index.js "$@"\n' > /usr/local/bin/openclaw \
-  && chmod +x /usr/local/bin/openclaw
+# Allow non-root user to write temp files during runtime/tests.
+RUN chown -R node:node /app
 
-# Do not hardcode PORT. Render injects PORT via env vars.
-EXPOSE 8080
-
-# Run as non-root for security (matching base image)
+# Run as non-root user for security
 USER node
 
-CMD ["/usr/local/bin/proxy"]
+# Render injects PORT. We must use it, not hardcode 8080.
+CMD ["sh","-lc","node openclaw.mjs gateway --allow-unconfigured --bind lan --port ${PORT}"]
