@@ -58,3 +58,7 @@ vendor/
 !vendor/a2ui/renderers/
 !vendor/a2ui/renderers/lit/
 !vendor/a2ui/renderers/lit/**
+
+# Keep onboard non-interactive local modules in Docker build context.
+!src/commands/onboard-non-interactive/local/**
+!src/commands/onboard-non-interactive/local.ts
