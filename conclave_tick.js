@@ -399,6 +399,8 @@ function buildAutoAllocations(ideas, selfPct) {
 const tickStartedAtMs = Date.now();
 let tickEnded = false;
 const tickStatePath = env("OPENCLAW_TICK_STATE_PATH", "/data/tick_state.json");
+const tickStateUrl = env("OPENCLAW_TICK_STATE_URL", "").trim();
+const tickStateWriteToken = env("OPENCLAW_TICK_STATE_WRITE_TOKEN", "").trim();
 let tickFailedState = null;
 const tickStats = {
   debatesFetched: 0,
@@ -431,6 +433,22 @@ async function persistTickState(summary, failedState) {
     if (failedState) next.last_tick_failed = failedState;
     await fs.writeFile(tickStatePath, JSON.stringify(next), "utf8");
   } catch {}
+
+  if (tickStateUrl && tickStateWriteToken) {
+    try {
+      await fetch(tickStateUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tickStateWriteToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          last_tick_summary: summary,
+          last_tick_failed: failedState || null,
+        }),
+      });
+    } catch {}
+  }
 }
 
 async function tickEnd(status) {
