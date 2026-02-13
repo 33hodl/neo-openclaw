@@ -21,7 +21,14 @@ if [[ ! -d "$A2UI_RENDERER_DIR" || ! -d "$A2UI_APP_DIR" ]]; then
     exit 0
   fi
   echo "A2UI sources missing and no prebuilt bundle found at: $OUTPUT_FILE" >&2
-  exit 1
+  echo "Creating placeholder A2UI bundle for server build." >&2
+  mkdir -p "$(dirname "$OUTPUT_FILE")"
+  cat > "$OUTPUT_FILE" <<'STUB'
+// Placeholder A2UI bundle for server-only builds.
+// Real A2UI bundle is produced when vendor/app sources are available.
+globalThis.__OPENCLAW_A2UI_PLACEHOLDER__ = true;
+STUB
+  exit 0
 fi
 
 INPUT_PATHS=(
