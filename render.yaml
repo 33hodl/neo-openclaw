@@ -40,30 +40,3 @@ services:
       name: openclaw-data
       mountPath: /data
       sizeGB: 5
-
-  - type: worker
-    name: conclave-worker
-    runtime: docker
-    rootDir: .
-    dockerfilePath: Dockerfile
-    plan: standard
-    startCommand: node /app/conclave_tick.js --mode=loop
-    envVars:
-      - key: OPENCLAW_STATE_DIR
-        value: /data/.openclaw
-      - key: OPENCLAW_WORKSPACE_DIR
-        value: /data/workspace
-
-      - key: CONCLAVE_TOKEN
-        sync: false
-      - key: CONCLAVE_API_BASE
-        value: "https://api.conclave.sh"
-
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        value: "492859508"
-    disk:
-      name: openclaw-data
-      mountPath: /data
-      sizeGB: 5
