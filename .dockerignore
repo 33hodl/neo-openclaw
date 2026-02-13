@@ -62,3 +62,6 @@ vendor/
 # Keep onboard non-interactive local modules in Docker build context.
 !src/commands/onboard-non-interactive/local/**
 !src/commands/onboard-non-interactive/local.ts
+
+# Keep workspace templates in Docker build context.
+!docs/reference/templates/**

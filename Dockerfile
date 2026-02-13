@@ -31,6 +31,7 @@ ENV NODE_OPTIONS="--max-old-space-size=2048"
 RUN pnpm install --frozen-lockfile
 
 COPY . .
+RUN test -f docs/reference/templates/IDENTITY.md
 RUN bash -lc 'set -euxo pipefail; pnpm --version; node -v; pnpm build --reporter=append-only --loglevel=debug 2>&1 | tee /tmp/pnpm-build.log; echo "PNPM BUILD OK"'
 RUN bash -lc 'if [ -f /tmp/pnpm-build.log ]; then echo "==== PNPM BUILD LOG (tail 400) ===="; tail -n 400 /tmp/pnpm-build.log; fi'
 
