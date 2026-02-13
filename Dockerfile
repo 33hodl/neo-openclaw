@@ -33,8 +33,8 @@ RUN chown node:node /app/conclave_tick.js
 RUN printf '#!/bin/sh\nexec node /app/dist/index.js "$@"\n' > /usr/local/bin/openclaw \
   && chmod +x /usr/local/bin/openclaw
 
-ENV PORT=10000
-EXPOSE 10000
+# Do not hardcode PORT. Render injects PORT via env vars.
+EXPOSE 8080
 
 # Run as non-root for security (matching base image)
 USER node
