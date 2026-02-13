@@ -31,13 +31,6 @@ ENV NODE_OPTIONS="--max-old-space-size=2048"
 RUN pnpm install --frozen-lockfile
 
 COPY . .
-RUN set -eux; \
-    echo "=== DIAG: onboard-non-interactive dir ==="; \
-    ls -la src/commands/onboard-non-interactive || true; \
-    echo "=== DIAG: find local.* ==="; \
-    find src/commands/onboard-non-interactive -maxdepth 1 -type f -iname 'local.*' -print || true; \
-    echo "=== DIAG: exact path check ==="; \
-    test -f src/commands/onboard-non-interactive/local.ts && echo "FOUND local.ts" || (echo "MISSING local.ts" && exit 1)
 RUN bash -lc 'set -euxo pipefail; pnpm --version; node -v; pnpm build --reporter=append-only --loglevel=debug 2>&1 | tee /tmp/pnpm-build.log; echo "PNPM BUILD OK"'
 RUN bash -lc 'if [ -f /tmp/pnpm-build.log ]; then echo "==== PNPM BUILD LOG (tail 400) ===="; tail -n 400 /tmp/pnpm-build.log; fi'
 
