@@ -64,4 +64,7 @@ vendor/
 !src/commands/onboard-non-interactive/local.ts
 
 # Keep workspace templates in Docker build context.
+!docs/
+!docs/reference/
+!docs/reference/templates/
 !docs/reference/templates/**
