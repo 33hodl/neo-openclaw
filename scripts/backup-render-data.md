@@ -11,6 +11,29 @@
 - Logs/config path note:
   - Startup logs may show active config path; if not shown, that is expected.
 
+## Cloud backups (recommended)
+
+Required Render env vars:
+
+- `OPENCLAW_BACKUP_S3_ENDPOINT`
+- `OPENCLAW_BACKUP_S3_REGION`
+- `OPENCLAW_BACKUP_S3_BUCKET`
+- `OPENCLAW_BACKUP_S3_PREFIX`
+- `OPENCLAW_BACKUP_S3_ACCESS_KEY_ID`
+- `OPENCLAW_BACKUP_S3_SECRET_ACCESS_KEY`
+
+Backup command:
+
+```bash
+node scripts/backup-to-s3.mjs
+```
+
+Restore command:
+
+```bash
+node scripts/restore-from-s3.mjs <object-key>
+```
+
 ## Manual backup (Render Shell)
 
 Run in the web service shell:
