@@ -55,7 +55,7 @@ ls -lh "$ARCHIVE"
 echo "Download this file from Render shell UI: $ARCHIVE"
 ```
 
-Restore drill (after uploading archive back to `/tmp`):
+## Restore drill (after uploading archive back to `/tmp`)
 
 ```bash
 set -euo pipefail
