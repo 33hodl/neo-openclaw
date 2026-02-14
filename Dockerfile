@@ -20,7 +20,8 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 # Keep source-of-truth version in repo file and build that exact tag.
 COPY OPENCLAW_VERSION /tmp/OPENCLAW_VERSION
 RUN OPENCLAW_VERSION="$(tr -d '[:space:]' < /tmp/OPENCLAW_VERSION)" && \
-    git clone --depth 1 --branch "$OPENCLAW_VERSION" https://github.com/openclaw/openclaw.git /app
+    git clone --depth 1 --branch "$OPENCLAW_VERSION" https://github.com/openclaw/openclaw.git /app && \
+    echo "$OPENCLAW_VERSION" > /app/OPENCLAW_VERSION
 
 WORKDIR /app
 
