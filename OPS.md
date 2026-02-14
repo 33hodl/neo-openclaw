@@ -4,6 +4,20 @@
 
 - Render URL: `https://openclaw-ttrj.onrender.com`
 
+## Render dashboard settings (must match repo)
+
+- Do not set a manual Start Command override in Render dashboard.
+- Use repo start command only:
+  - `node openclaw.mjs gateway --allow-unconfigured --bind lan --port ${PORT}`
+- If a Start Command override exists, delete it in Render service settings.
+- Required env var:
+  - `OPENCLAW_CONFIG_PATH=/data/.openclaw/openclaw.json`
+- Verify in Render web shell:
+  - `echo $OPENCLAW_CONFIG_PATH`
+- Logs/config path note:
+  - Some builds print the active config path at startup; if not printed, this is expected.
+  - Primary verification is the env var value in shell.
+
 ## Version check
 
 Run in Render shell:
