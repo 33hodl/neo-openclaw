@@ -87,6 +87,11 @@ export const dispatchTelegramMessage = async ({
     reactionApi,
     removeAckAfterReply,
   } = context;
+  const updateId =
+    typeof (primaryCtx as { update?: { update_id?: unknown } })?.update?.update_id === "number"
+      ? (primaryCtx as { update?: { update_id?: number } }).update?.update_id
+      : undefined;
+  const messageId = msg.message_id;
 
   const isPrivateChat = msg.chat.type === "private";
   const draftThreadId = threadSpec.id;
@@ -251,6 +256,10 @@ export const dispatchTelegramMessage = async ({
     skippedNonSilent: 0,
   };
 
+  const modelStartMs = Date.now();
+  logVerbose(
+    `telegram timing: model_start update=${updateId ?? "na"} message=${messageId} ts=${modelStartMs}`,
+  );
   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg,
@@ -278,6 +287,9 @@ export const dispatchTelegramMessage = async ({
         });
         if (result.delivered) {
           deliveryState.delivered = true;
+          logVerbose(
+            `telegram timing: reply_sent update=${updateId ?? "na"} message=${messageId} kind=${info.kind} ts=${Date.now()}`,
+          );
         }
       },
       onSkip: (_payload, info) => {
@@ -307,6 +319,9 @@ export const dispatchTelegramMessage = async ({
       onModelSelected,
     },
   });
+  logVerbose(
+    `telegram timing: model_end update=${updateId ?? "na"} message=${messageId} ts=${Date.now()} durationMs=${Date.now() - modelStartMs}`,
+  );
   draftStream?.stop();
   let sentFallback = false;
   if (!deliveryState.delivered && deliveryState.skippedNonSilent > 0) {

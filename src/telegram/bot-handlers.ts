@@ -689,6 +689,14 @@ export const registerTelegramHandlers = ({
         return;
       }
 
+      const updateId =
+        typeof (ctx as { update?: { update_id?: unknown } })?.update?.update_id === "number"
+          ? (ctx as { update?: { update_id?: number } }).update?.update_id
+          : undefined;
+      logVerbose(
+        `telegram timing: received update=${updateId ?? "na"} message=${msg.message_id} ts=${Date.now()}`,
+      );
+
       const chatId = msg.chat.id;
       const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
       const messageThreadId = msg.message_thread_id;
