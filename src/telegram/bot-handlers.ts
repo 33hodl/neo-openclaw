@@ -57,6 +57,11 @@ export const registerTelegramHandlers = ({
   processMessage,
   logger,
 }: RegisterTelegramHandlerParams) => {
+  const TELEGRAM_FAST_PATH_REPLIES: Record<string, string> = {
+    ping: "pong",
+    hello: "hello",
+    test: "ok",
+  };
   const TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS = 4000;
   const TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS = 1500;
   const TELEGRAM_TEXT_FRAGMENT_MAX_ID_GAP = 1;
@@ -782,9 +787,50 @@ export const registerTelegramHandlers = ({
         }
       }
 
+      const text = typeof msg.text === "string" ? msg.text : undefined;
+      if (!isGroup && text) {
+        const normalized = text.trim().toLowerCase();
+        const fastReply = TELEGRAM_FAST_PATH_REPLIES[normalized];
+        if (fastReply) {
+          const senderId = msg.from?.id ? String(msg.from.id) : "";
+          const senderUsername = msg.from?.username ?? "";
+          const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
+          const effectiveDmAllow = normalizeAllowFromWithStore({
+            allowFrom: telegramCfg.allowFrom,
+            storeAllowFrom,
+          });
+          if (dmPolicy === "disabled") {
+            return;
+          }
+          if (dmPolicy !== "open") {
+            const allowed =
+              effectiveDmAllow.hasWildcard ||
+              (effectiveDmAllow.hasEntries &&
+                senderId &&
+                isSenderAllowed({
+                  allow: effectiveDmAllow,
+                  senderId,
+                  senderUsername,
+                }));
+            if (!allowed) {
+              return;
+            }
+          }
+          logVerbose(`telegram fast-path: ${normalized}`);
+          await withTelegramApiErrorLogging({
+            operation: "sendMessage",
+            runtime,
+            fn: () =>
+              bot.api.sendMessage(chatId, fastReply, {
+                reply_to_message_id: msg.message_id,
+              }),
+          }).catch(() => {});
+          return;
+        }
+      }
+
       // Text fragment handling - Telegram splits long pastes into multiple inbound messages (~4096 chars).
       // We buffer “near-limit” messages and append immediately-following parts.
-      const text = typeof msg.text === "string" ? msg.text : undefined;
       const isCommandLike = (text ?? "").trim().startsWith("/");
       if (text && !isCommandLike) {
         const nowMs = Date.now();

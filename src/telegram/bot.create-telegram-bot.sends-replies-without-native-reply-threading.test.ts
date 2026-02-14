@@ -189,6 +189,55 @@ describe("createTelegramBot", () => {
       expect(call[2]?.reply_to_message_id).toBeUndefined();
     }
   });
+  it("uses DM fast-path for ping/hello/test without invoking the agent", async () => {
+    onSpy.mockReset();
+    sendMessageSpy.mockReset();
+    const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
+    replySpy.mockReset();
+
+    createTelegramBot({ token: "tok" });
+    const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
+
+    await handler({
+      message: {
+        chat: { id: 5, type: "private" },
+        text: "  Ping  ",
+        from: { id: 123, username: "tester" },
+        date: 1736380800,
+        message_id: 101,
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+    await handler({
+      message: {
+        chat: { id: 5, type: "private" },
+        text: "HELLO",
+        from: { id: 123, username: "tester" },
+        date: 1736380801,
+        message_id: 102,
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+    await handler({
+      message: {
+        chat: { id: 5, type: "private" },
+        text: "test",
+        from: { id: 123, username: "tester" },
+        date: 1736380802,
+        message_id: 103,
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+
+    expect(sendMessageSpy.mock.calls).toHaveLength(3);
+    expect(sendMessageSpy.mock.calls[0]?.[1]).toBe("pong");
+    expect(sendMessageSpy.mock.calls[1]?.[1]).toBe("hello");
+    expect(sendMessageSpy.mock.calls[2]?.[1]).toBe("ok");
+    expect(replySpy).not.toHaveBeenCalled();
+  });
   it("honors replyToMode=first for threaded replies", async () => {
     onSpy.mockReset();
     sendMessageSpy.mockReset();
