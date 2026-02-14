@@ -57,6 +57,8 @@ echo "Download this file from Render shell UI: $ARCHIVE"
 
 ## Restore drill (after uploading archive back to `/tmp`)
 
+Run in Render web shell:
+
 ```bash
 set -euo pipefail
 ARCHIVE="/tmp/openclaw-backup-drill-YYYYMMDD-HHMMSS.tar.gz"
