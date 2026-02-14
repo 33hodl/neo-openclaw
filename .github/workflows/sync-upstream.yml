@@ -1,0 +1,82 @@
+name: Sync Upstream Template
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Pull upstream template changes (safe squash)
+        id: sync
+        run: |
+          set -euo pipefail
+
+          git remote add upstream-template https://github.com/render-examples/openclaw-render.git 2>/dev/null || true
+          git fetch upstream-template main
+
+          git checkout -B chore/sync-upstream-template
+
+          set +e
+          git merge --squash --no-commit upstream-template/main
+          merge_status=$?
+          set -e
+
+          if [ "$merge_status" -ne 0 ]; then
+            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --cached --quiet; then
+            echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fail when manual conflict resolution is needed
+        if: steps.sync.outputs.merge_conflict == 'true'
+        run: |
+          echo "Upstream sync produced conflicts. Resolve manually in a regular branch + PR."
+          exit 1
+
+      - name: Create or update PR
+        if: steps.sync.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/sync-upstream-template
+          base: ${{ github.event.repository.default_branch }}
+          title: "chore: sync from render-examples/openclaw-render"
+          commit-message: "chore: sync from render-examples/openclaw-render"
+          body: |
+            Sync upstream changes from `render-examples/openclaw-render` into this repo.
+
+            Safety notes:
+            - Opens/updates a PR only (no direct push to default branch)
+            - Never force-pushes default branch
+            - Conflicts fail the workflow for manual review
+          labels: |
+            dependencies
+            automation
+          delete-branch: false
