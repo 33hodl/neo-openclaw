@@ -1,4 +1,4 @@
-ARG OPENCLAW_VERSION=v2026.2.14
+ARG OPENCLAW_VERSION=2026.2.14
 
 # Build Go proxy
 FROM golang:1.22-bookworm AS proxy-builder
