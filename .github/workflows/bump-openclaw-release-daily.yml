@@ -34,22 +34,16 @@ jobs:
             exit 1
           fi
 
-          current_tag="$(sed -nE 's/^ARG OPENCLAW_VERSION=(v?[0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' Dockerfile | head -n1)"
+          current_tag="$(sed -nE 's/^ARG OPENCLAW_VERSION=(v[0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' Dockerfile | head -n1)"
           if [ -z "$current_tag" ]; then
             echo "Unable to determine current pinned OPENCLAW_VERSION from Dockerfile."
             exit 1
           fi
 
-          latest_version="${latest_tag#v}"
-          current_version="${current_tag#v}"
-
           echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
-          echo "latest_version=$latest_version" >> "$GITHUB_OUTPUT"
           echo "current_tag=$current_tag" >> "$GITHUB_OUTPUT"
-          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
-
-          if [ "$current_version" = "$latest_version" ]; then
-            echo "Already on latest v$latest_version"
+          if [ "$current_tag" = "$latest_tag" ]; then
+            echo "Already on latest $latest_tag"
             echo "has_update=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -60,7 +54,7 @@ jobs:
         if: steps.versions.outputs.has_update == 'true'
         run: |
           set -euo pipefail
-          sed -i.bak -E "s/^ARG OPENCLAW_VERSION=.*/ARG OPENCLAW_VERSION=v${{ steps.versions.outputs.latest_version }}/" Dockerfile
+          sed -i.bak -E "s/^ARG OPENCLAW_VERSION=.*/ARG OPENCLAW_VERSION=${{ steps.versions.outputs.latest_tag }}/" Dockerfile
           rm -f Dockerfile.bak
 
       - name: Create or update bump PR
@@ -71,8 +65,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: chore/bump-openclaw-release
           base: main
-          title: "chore: bump OpenClaw to v${{ steps.versions.outputs.latest_version }}"
-          commit-message: "chore: bump OpenClaw to v${{ steps.versions.outputs.latest_version }}"
+          title: "chore: bump OpenClaw to ${{ steps.versions.outputs.latest_tag }}"
+          commit-message: "chore: bump OpenClaw to ${{ steps.versions.outputs.latest_tag }}"
           body: |
             Automated OpenClaw version bump.
 
@@ -98,11 +92,6 @@ jobs:
           echo "$diff_files"
 
           file_count="$(echo "$diff_files" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
-          high_risk="false"
-
-          if echo "$diff_files" | rg -n '^(render\.yaml|proxy/)' >/dev/null; then
-            high_risk="true"
-          fi
 
           only_dockerfile="false"
           only_openclaw_arg_change="false"
@@ -116,16 +105,21 @@ jobs:
           fi
 
           allow_auto_merge="false"
-          if [ "$high_risk" = "false" ] && [ "$only_dockerfile" = "true" ] && [ "$only_openclaw_arg_change" = "true" ]; then
+          if [ "$only_dockerfile" = "true" ] && [ "$only_openclaw_arg_change" = "true" ]; then
             allow_auto_merge="true"
           fi
 
+          needs_review="true"
+          if [ "$allow_auto_merge" = "true" ]; then
+            needs_review="false"
+          fi
+
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
-          echo "high_risk=$high_risk" >> "$GITHUB_OUTPUT"
+          echo "needs_review=$needs_review" >> "$GITHUB_OUTPUT"
           echo "allow_auto_merge=$allow_auto_merge" >> "$GITHUB_OUTPUT"
 
       - name: Ensure needs-review label exists
-        if: steps.safety.outputs.high_risk == 'true'
+        if: steps.safety.outputs.needs_review == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -149,8 +143,8 @@ jobs:
               }
             }
 
-      - name: Label PR when high-risk paths changed
-        if: steps.safety.outputs.high_risk == 'true'
+      - name: Label PR when diff is not auto-merge safe
+        if: steps.safety.outputs.needs_review == 'true'
         run: |
           set -euo pipefail
           gh pr edit "${{ steps.safety.outputs.pr_number }}" --add-label "needs-review"

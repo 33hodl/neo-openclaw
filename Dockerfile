@@ -1,43 +1,34 @@
-FROM node:22-bookworm
-
 ARG OPENCLAW_VERSION=v2026.2.14
-ARG OPENCLAW_DOCKER_APT_PACKAGES=""
 
-# Install build tools needed by OpenClaw deps and clone source.
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates \
-      git \
-      python3 \
-      make \
-      g++ \
-      ripgrep \
-      $OPENCLAW_DOCKER_APT_PACKAGES && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+# Build Go proxy
+FROM golang:1.22-bookworm AS proxy-builder
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /proxy
+COPY proxy/ .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /proxy-bin .
 
-# Keep source-of-truth version pinned in Dockerfile.
-RUN git clone --depth 1 --branch "$OPENCLAW_VERSION" https://github.com/openclaw/openclaw.git /app && \
-    echo "$OPENCLAW_VERSION" > /app/OPENCLAW_VERSION
+# Extend pre-built OpenClaw with our auth proxy
+FROM alpine/openclaw:${OPENCLAW_VERSION}
 
-WORKDIR /app
+# Base image ends with USER node; switch to root for setup
+USER root
 
-ENV CI=1
-ENV PNPM_WORKSPACE_CONCURRENCY=1
-ENV NODE_OPTIONS="--max-old-space-size=2048"
+# Add packages for openclaw agent operations
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ripgrep \
+  && rm -rf /var/lib/apt/lists/*
 
-RUN pnpm install --frozen-lockfile
-RUN pnpm build
-RUN pnpm ui:build
+# Add proxy
+COPY --from=proxy-builder /proxy-bin /usr/local/bin/proxy
 
-ENV NODE_ENV=production
-ENV OPENCLAW_PREFER_PNPM=1
+# Create CLI wrapper (openclaw code is at /app/dist/index.js in base image)
+RUN printf '#!/bin/sh\nexec node /app/dist/index.js "$@"\n' > /usr/local/bin/openclaw \
+  && chmod +x /usr/local/bin/openclaw
 
-# Run as non-root for security.
-RUN chown -R node:node /app
+ENV PORT=8080
+EXPOSE 8080
+
+# Run as non-root for security (matching base image)
 USER node
 
-# Render injects PORT. We must use it, not hardcode 8080.
-CMD ["sh","-lc","node openclaw.mjs gateway --allow-unconfigured --bind lan --port ${PORT}"]
+CMD ["/usr/local/bin/proxy"]
