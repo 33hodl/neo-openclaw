@@ -12,6 +12,9 @@ export function formatBillingErrorMessage(provider?: string): string {
 }
 
 export const BILLING_ERROR_USER_MESSAGE = formatBillingErrorMessage();
+export const RATE_LIMIT_ERROR_USER_MESSAGE = "⚠️ API rate limit reached. Please try again later.";
+export const TELEGRAM_TIMEOUT_USER_MESSAGE =
+  "⚠️ Telegram polling timed out. Retrying automatically. Try again in 1 minute.";
 
 export function isContextOverflowError(errorMessage?: string): boolean {
   if (!errorMessage) {
@@ -41,6 +44,13 @@ const CONTEXT_OVERFLOW_HINT_RE =
   /context.*overflow|context window.*(too (?:large|long)|exceed|over|limit|max(?:imum)?|requested|sent|tokens)|prompt.*(too (?:large|long)|exceed|over|limit|max(?:imum)?)|(?:request|input).*(?:context|window|length|token).*(too (?:large|long)|exceed|over|limit|max(?:imum)?)/i;
 const RATE_LIMIT_HINT_RE =
   /rate limit|too many requests|requests per (?:minute|hour|day)|quota|throttl|429\b/i;
+
+export function isTelegramTimeoutLike(errorMessage?: string): boolean {
+  if (!errorMessage) {
+    return false;
+  }
+  return /getupdates/i.test(errorMessage) && /(timed out|timeout)/i.test(errorMessage);
+}
 
 export function isLikelyContextOverflowError(errorMessage?: string): boolean {
   if (!errorMessage) {
@@ -465,6 +475,14 @@ export function formatAssistantErrorText(
     return "The AI service is temporarily overloaded. Please try again in a moment.";
   }
 
+  if (isTelegramTimeoutLike(raw)) {
+    return TELEGRAM_TIMEOUT_USER_MESSAGE;
+  }
+
+  if (isRateLimitErrorMessage(raw)) {
+    return RATE_LIMIT_ERROR_USER_MESSAGE;
+  }
+
   if (isBillingErrorMessage(raw)) {
     return formatBillingErrorMessage(opts?.provider);
   }
@@ -517,8 +535,14 @@ export function sanitizeUserFacingText(text: string, opts?: { errorContext?: boo
     }
 
     if (ERROR_PREFIX_RE.test(trimmed)) {
-      if (isOverloadedErrorMessage(trimmed) || isRateLimitErrorMessage(trimmed)) {
+      if (isOverloadedErrorMessage(trimmed)) {
         return "The AI service is temporarily overloaded. Please try again in a moment.";
+      }
+      if (isTelegramTimeoutLike(trimmed)) {
+        return TELEGRAM_TIMEOUT_USER_MESSAGE;
+      }
+      if (isRateLimitErrorMessage(trimmed)) {
+        return RATE_LIMIT_ERROR_USER_MESSAGE;
       }
       if (isTimeoutErrorMessage(trimmed)) {
         return "LLM request timed out.";
