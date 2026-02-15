@@ -55,34 +55,48 @@ jobs:
             fi
           done
 
+          # Auto-resolve remaining conflicts:
+          # - protected paths => ours
+          # - all others => theirs (upstream template)
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              render.yaml|Dockerfile|conclave_tick.js|proxy|proxy/*)
+                git checkout --ours -- "$path"
+                ;;
+              *)
+                git checkout --theirs -- "$path"
+                ;;
+            esac
+            git add -- "$path"
+          done < <(git diff --name-only --diff-filter=U)
+
           unresolved_count="$(git diff --name-only --diff-filter=U | wc -l | tr -d '[:space:]')"
           if [ "$unresolved_count" != "0" ]; then
             echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            echo "broken_state=true" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "broken_state=false" >> "$GITHUB_OUTPUT"
+
+          if git diff --cached --quiet; then
+            if [ "$merge_exit" -ne 0 ]; then
+              echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+            fi
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ "$merge_exit" -ne 0 ]; then
-            # Any non-zero merge exit without unresolved files still means manual review is safer.
             echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if git diff --cached --quiet; then
+          else
             echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
-
-          echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
-
-      - name: Fail when manual conflict resolution is needed
-        if: steps.sync.outputs.merge_conflict == 'true'
-        run: |
-          echo "Upstream sync produced conflicts. Resolve manually in a regular branch + PR."
-          exit 1
 
       - name: Create or update PR
         if: steps.sync.outputs.has_changes == 'true'
@@ -95,12 +109,22 @@ jobs:
           commit-message: "chore: sync from render-examples/openclaw-render"
           body: |
             Sync upstream changes from `render-examples/openclaw-render` into this repo.
+            Auto-resolved conflicts: protected files kept from this repo; other conflicts accepted from upstream. Please review.
 
             Safety notes:
             - Opens/updates a PR only (no direct push to default branch)
             - Never force-pushes default branch
-            - Conflicts fail the workflow for manual review
+            - Protected files are always kept from this repository
+            - Non-protected conflicts are accepted from upstream template
+            - Workflow only fails if files remain unmerged after auto-resolve
           labels: |
             dependencies
             automation
           delete-branch: false
+
+      - name: Fail only on unresolved git state
+        if: steps.sync.outputs.broken_state == 'true'
+        run: |
+          echo "Auto-resolve attempted, but git still has unmerged files. Manual fix required."
+          git status --short
+          exit 1
