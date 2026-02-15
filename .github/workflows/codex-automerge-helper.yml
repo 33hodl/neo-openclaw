@@ -23,23 +23,52 @@ jobs:
       - name: Evaluate automerge guardrails
         id: guard
         env:
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_REPO: ${{ github.repository }}
-          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          echo "allow=false" >> "$GITHUB_OUTPUT"
+
+          PR_AUTHOR="$(gh api "/repos/$CURRENT_REPO/pulls/$PR_NUMBER" --jq '.user.login')" || exit 0
+          PR_HEAD_REPO="$(gh api "/repos/$CURRENT_REPO/pulls/$PR_NUMBER" --jq '.head.repo.full_name')" || exit 0
+          PR_BASE_BRANCH="$(gh api "/repos/$CURRENT_REPO/pulls/$PR_NUMBER" --jq '.base.ref')" || exit 0
+          PR_DRAFT="$(gh api "/repos/$CURRENT_REPO/pulls/$PR_NUMBER" --jq '.draft')" || exit 0
+          PR_STATE="$(gh api "/repos/$CURRENT_REPO/pulls/$PR_NUMBER" --jq '.state')" || exit 0
+          PR_HEAD_SHA="$(gh api "/repos/$CURRENT_REPO/pulls/$PR_NUMBER" --jq '.head.sha')" || exit 0
+
           if [ "$PR_AUTHOR" != "33hodl" ]; then
-            echo "allow=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if [ "$HEAD_REPO" != "$CURRENT_REPO" ]; then
-            echo "allow=false" >> "$GITHUB_OUTPUT"
+          if [ "$PR_HEAD_REPO" != "$CURRENT_REPO" ]; then
             exit 0
           fi
 
-          if [ "$BASE_BRANCH" != "main" ]; then
-            echo "allow=false" >> "$GITHUB_OUTPUT"
+          if [ "$PR_BASE_BRANCH" != "main" ]; then
+            exit 0
+          fi
+
+          if [ "$PR_DRAFT" != "false" ]; then
+            exit 0
+          fi
+
+          if [ "$PR_STATE" != "open" ]; then
+            exit 0
+          fi
+
+          DOCKER_CHECK_COUNT="$(gh api "/repos/$CURRENT_REPO/commits/$PR_HEAD_SHA/check-runs?check_name=dockerfile-sanity" --jq '.total_count')" || exit 0
+          if [ "$DOCKER_CHECK_COUNT" = "0" ]; then
+            exit 0
+          fi
+
+          DOCKER_CHECK_STATUS="$(gh api "/repos/$CURRENT_REPO/commits/$PR_HEAD_SHA/check-runs?check_name=dockerfile-sanity" --jq '.check_runs | sort_by(.completed_at // .started_at // .created_at) | last | .status')" || exit 0
+          DOCKER_CHECK_CONCLUSION="$(gh api "/repos/$CURRENT_REPO/commits/$PR_HEAD_SHA/check-runs?check_name=dockerfile-sanity" --jq '.check_runs | sort_by(.completed_at // .started_at // .created_at) | last | .conclusion')" || exit 0
+
+          if [ "$DOCKER_CHECK_STATUS" != "completed" ]; then
+            exit 0
+          fi
+
+          if [ "$DOCKER_CHECK_CONCLUSION" != "success" ]; then
             exit 0
           fi
 
