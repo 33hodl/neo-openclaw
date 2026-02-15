@@ -33,8 +33,6 @@ jobs:
           git remote add upstream-template https://github.com/render-examples/openclaw-render.git 2>/dev/null || true
           git fetch upstream-template main
 
-          git checkout -B chore/sync-upstream-template
-
           # Keep deployment/auth wiring owned by this repo.
           protected_paths=(
             "render.yaml"
@@ -116,7 +114,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: chore/sync-upstream-template
-          base: ${{ github.event.repository.default_branch }}
+          base: main
           title: "chore: sync from render-examples/openclaw-render"
           commit-message: "chore: sync from render-examples/openclaw-render"
           body: |
