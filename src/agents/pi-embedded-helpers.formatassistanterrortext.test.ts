@@ -2,6 +2,8 @@ import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   BILLING_ERROR_USER_MESSAGE,
+  RATE_LIMIT_ERROR_USER_MESSAGE,
+  TELEGRAM_TIMEOUT_USER_MESSAGE,
   formatBillingErrorMessage,
   formatAssistantErrorText,
 } from "./pi-embedded-helpers.js";
@@ -57,6 +59,14 @@ describe("formatAssistantErrorText", () => {
     expect(formatAssistantErrorText(msg)).toBe(
       "The AI service is temporarily overloaded. Please try again in a moment.",
     );
+  });
+  it("returns a dedicated message for rate-limit errors", () => {
+    const msg = makeAssistantError("HTTP 429 Too Many Requests: rate limit reached");
+    expect(formatAssistantErrorText(msg)).toBe(RATE_LIMIT_ERROR_USER_MESSAGE);
+  });
+  it("returns a dedicated message for Telegram polling timeout errors", () => {
+    const msg = makeAssistantError("Request to 'getUpdates' timed out after 30 seconds");
+    expect(formatAssistantErrorText(msg)).toBe(TELEGRAM_TIMEOUT_USER_MESSAGE);
   });
   it("returns a recovery hint when tool call input is missing", () => {
     const msg = makeAssistantError("tool_use.input: Field required");

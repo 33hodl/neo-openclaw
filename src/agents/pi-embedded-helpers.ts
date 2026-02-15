@@ -7,6 +7,8 @@ export {
 } from "./pi-embedded-helpers/bootstrap.js";
 export {
   BILLING_ERROR_USER_MESSAGE,
+  RATE_LIMIT_ERROR_USER_MESSAGE,
+  TELEGRAM_TIMEOUT_USER_MESSAGE,
   formatBillingErrorMessage,
   classifyFailoverReason,
   formatRawAssistantErrorForUi,
@@ -31,6 +33,7 @@ export {
   isRawApiErrorPayload,
   isRateLimitAssistantError,
   isRateLimitErrorMessage,
+  isTelegramTimeoutLike,
   isTransientHttpError,
   isTimeoutErrorMessage,
   parseImageDimensionError,

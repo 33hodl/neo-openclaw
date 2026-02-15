@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeUserFacingText } from "./pi-embedded-helpers.js";
+import {
+  RATE_LIMIT_ERROR_USER_MESSAGE,
+  TELEGRAM_TIMEOUT_USER_MESSAGE,
+  sanitizeUserFacingText,
+} from "./pi-embedded-helpers.js";
 
 describe("sanitizeUserFacingText", () => {
   it("strips final tags", () => {
@@ -58,6 +62,16 @@ describe("sanitizeUserFacingText", () => {
     expect(sanitizeUserFacingText(raw, { errorContext: true })).toBe(
       "LLM error server_error: Something exploded",
     );
+  });
+
+  it("maps rate-limit errors to a dedicated user message", () => {
+    const raw = "Error: HTTP 429 Too Many Requests: rate limit reached";
+    expect(sanitizeUserFacingText(raw, { errorContext: true })).toBe(RATE_LIMIT_ERROR_USER_MESSAGE);
+  });
+
+  it("maps Telegram getUpdates timeouts to a dedicated user message", () => {
+    const raw = "Error: Request to 'getUpdates' timed out after 30 seconds";
+    expect(sanitizeUserFacingText(raw, { errorContext: true })).toBe(TELEGRAM_TIMEOUT_USER_MESSAGE);
   });
 
   it("collapses consecutive duplicate paragraphs", () => {
