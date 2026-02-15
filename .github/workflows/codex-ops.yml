@@ -1,0 +1,73 @@
+name: codex-ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: Base branch to branch from
+        required: true
+        default: main
+      new_branch:
+        description: New branch name
+        required: true
+      patch_file:
+        description: Repository-relative .patch file path to apply
+        required: true
+      pr_title:
+        description: Pull request title
+        required: true
+        default: "chore: codex ops patch"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  create-pr-from-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create branch and apply patch
+        env:
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          NEW_BRANCH: ${{ inputs.new_branch }}
+          PATCH_FILE: ${{ inputs.patch_file }}
+        run: |
+          test -f "$PATCH_FILE"
+          git fetch origin "$BASE_BRANCH"
+          git switch --create "$NEW_BRANCH" "origin/$BASE_BRANCH"
+          git apply --index "$PATCH_FILE"
+          git diff --cached --quiet && { echo "Patch produced no changes"; exit 1; }
+          git commit -m "${{ inputs.pr_title }}"
+
+      - name: Push branch
+        env:
+          NEW_BRANCH: ${{ inputs.new_branch }}
+        run: git push --set-upstream origin "$NEW_BRANCH"
+
+      - name: Ensure automerge label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh label create automerge --description "Enable auto-merge helper" --color "0E8A16" || true
+
+      - name: Open PR and label automerge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          NEW_BRANCH: ${{ inputs.new_branch }}
+          PR_TITLE: ${{ inputs.pr_title }}
+        run: |
+          pr_url="$(gh pr create --base "$BASE_BRANCH" --head "$NEW_BRANCH" --title "$PR_TITLE" --body "Automated PR created by codex-ops workflow.")"
+          gh pr edit "$pr_url" --add-label automerge
+          echo "Created $pr_url"

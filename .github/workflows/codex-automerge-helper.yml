@@ -1,0 +1,27 @@
+name: codex-automerge-helper
+
+on:
+  pull_request_target:
+    types:
+      - labeled
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-automerge:
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'automerge') &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable squash auto-merge and delete branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR_NUMBER" --squash --delete-branch --auto

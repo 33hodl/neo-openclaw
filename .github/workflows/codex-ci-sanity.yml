@@ -1,0 +1,23 @@
+name: codex-ci-sanity
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  dockerfile-sanity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker version
+        run: docker --version
+
+      - name: Build proxy stage (sanity)
+        run: docker build --file Dockerfile --target proxy-builder --tag neo-openclaw-ci-sanity:proxy-builder .
