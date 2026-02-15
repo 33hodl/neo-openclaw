@@ -14,13 +14,36 @@ permissions:
 
 jobs:
   enable-automerge:
-    if: >-
-      contains(github.event.pull_request.labels.*.name, 'automerge') &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: contains(github.event.pull_request.labels.*.name, 'automerge')
     runs-on: ubuntu-latest
     steps:
+      - name: Evaluate automerge guardrails
+        id: guard
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          CURRENT_REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "$PR_AUTHOR" != "33hodl" ]; then
+            echo "allow=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$HEAD_REPO" != "$CURRENT_REPO" ]; then
+            echo "allow=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$BASE_BRANCH" != "main" ]; then
+            echo "allow=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "allow=true" >> "$GITHUB_OUTPUT"
+
       - name: Enable squash auto-merge and delete branch
+        if: steps.guard.outputs.allow == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
