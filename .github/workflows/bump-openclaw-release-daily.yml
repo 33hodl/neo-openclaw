@@ -1,0 +1,162 @@
+name: Bump OpenClaw Release Daily
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  bump-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: main
+
+      - name: Resolve current and latest versions
+        id: versions
+        run: |
+          set -euo pipefail
+
+          latest_tag="$(curl -fsSL https://api.github.com/repos/openclaw/openclaw/releases/latest | jq -r '.tag_name')"
+          if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
+            echo "Unable to determine latest release tag."
+            exit 1
+          fi
+
+          current_tag="$(sed -nE 's/^ARG OPENCLAW_VERSION=(v?[0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' Dockerfile | head -n1)"
+          if [ -z "$current_tag" ]; then
+            echo "Unable to determine current pinned OPENCLAW_VERSION from Dockerfile."
+            exit 1
+          fi
+
+          latest_version="${latest_tag#v}"
+          current_version="${current_tag#v}"
+
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "latest_version=$latest_version" >> "$GITHUB_OUTPUT"
+          echo "current_tag=$current_tag" >> "$GITHUB_OUTPUT"
+          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
+
+          if [ "$current_version" = "$latest_version" ]; then
+            echo "Already on latest v$latest_version"
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_update=true" >> "$GITHUB_OUTPUT"
+
+      - name: Apply Dockerfile bump
+        if: steps.versions.outputs.has_update == 'true'
+        run: |
+          set -euo pipefail
+          sed -i.bak -E "s/^ARG OPENCLAW_VERSION=.*/ARG OPENCLAW_VERSION=v${{ steps.versions.outputs.latest_version }}/" Dockerfile
+          rm -f Dockerfile.bak
+
+      - name: Create or update bump PR
+        id: cpr
+        if: steps.versions.outputs.has_update == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/bump-openclaw-release
+          base: main
+          title: "chore: bump OpenClaw to v${{ steps.versions.outputs.latest_version }}"
+          commit-message: "chore: bump OpenClaw to v${{ steps.versions.outputs.latest_version }}"
+          body: |
+            Automated OpenClaw version bump.
+
+            - old: `${{ steps.versions.outputs.current_tag }}`
+            - new: `${{ steps.versions.outputs.latest_tag }}`
+            - source: scheduled daily workflow
+          labels: |
+            dependencies
+            automation
+          delete-branch: false
+
+      - name: Evaluate auto-merge safety
+        id: safety
+        if: steps.versions.outputs.has_update == 'true' && steps.cpr.outputs.pull-request-number != ''
+        run: |
+          set -euo pipefail
+
+          pr_number="${{ steps.cpr.outputs.pull-request-number }}"
+          pr_branch="chore/bump-openclaw-release"
+
+          git fetch origin main "$pr_branch"
+          diff_files="$(git diff --name-only "origin/main...origin/$pr_branch")"
+          echo "$diff_files"
+
+          file_count="$(echo "$diff_files" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+          high_risk="false"
+
+          if echo "$diff_files" | rg -n '^(render\.yaml|proxy/)' >/dev/null; then
+            high_risk="true"
+          fi
+
+          only_dockerfile="false"
+          only_openclaw_arg_change="false"
+
+          if [ "$file_count" = "1" ] && [ "$diff_files" = "Dockerfile" ]; then
+            only_dockerfile="true"
+            non_arg_changes="$(git diff --unified=0 "origin/main...origin/$pr_branch" -- Dockerfile | rg '^[+-]' | rg -v '^\+\+\+|^---|^[-+]ARG OPENCLAW_VERSION=' || true)"
+            if [ -z "$non_arg_changes" ]; then
+              only_openclaw_arg_change="true"
+            fi
+          fi
+
+          allow_auto_merge="false"
+          if [ "$high_risk" = "false" ] && [ "$only_dockerfile" = "true" ] && [ "$only_openclaw_arg_change" = "true" ]; then
+            allow_auto_merge="true"
+          fi
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "high_risk=$high_risk" >> "$GITHUB_OUTPUT"
+          echo "allow_auto_merge=$allow_auto_merge" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure needs-review label exists
+        if: steps.safety.outputs.high_risk == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const name = 'needs-review';
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name,
+                  color: 'd73a4a',
+                  description: 'Manual review required before merge',
+                });
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Label PR when high-risk paths changed
+        if: steps.safety.outputs.high_risk == 'true'
+        run: |
+          set -euo pipefail
+          gh pr edit "${{ steps.safety.outputs.pr_number }}" --add-label "needs-review"
+
+      - name: Enable auto-merge when safe
+        if: steps.safety.outputs.allow_auto_merge == 'true'
+        run: |
+          set -euo pipefail
+          gh pr merge "${{ steps.safety.outputs.pr_number }}" --auto --squash --delete-branch
