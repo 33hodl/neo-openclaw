@@ -34,12 +34,36 @@ jobs:
 
           git checkout -B chore/sync-upstream-template
 
+          # Keep deployment/auth wiring owned by this repo.
+          protected_paths=(
+            "render.yaml"
+            "Dockerfile"
+            "conclave_tick.js"
+            "proxy"
+          )
+
           set +e
-          git merge --squash --no-commit upstream-template/main
-          merge_status=$?
+          git merge --squash --no-commit --allow-unrelated-histories upstream-template/main
+          merge_exit=$?
           set -e
 
-          if [ "$merge_status" -ne 0 ]; then
+          # Always restore protected files from this repo's current branch.
+          for path in "${protected_paths[@]}"; do
+            if [ -e "$path" ] || git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+              git restore --source=HEAD --staged --worktree -- "$path" || true
+              git add -A -- "$path" || true
+            fi
+          done
+
+          unresolved_count="$(git diff --name-only --diff-filter=U | wc -l | tr -d '[:space:]')"
+          if [ "$unresolved_count" != "0" ]; then
+            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$merge_exit" -ne 0 ]; then
+            # Any non-zero merge exit without unresolved files still means manual review is safer.
             echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             exit 0
