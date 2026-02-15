@@ -33,17 +33,21 @@ jobs:
             echo "Unable to determine latest release tag."
             exit 1
           fi
+          latest_tag_normalized="${latest_tag#v}"
 
-          current_tag="$(sed -nE 's/^ARG OPENCLAW_VERSION=(v[0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' Dockerfile | head -n1)"
+          current_tag="$(sed -nE 's/^ARG OPENCLAW_VERSION=(v?[0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' Dockerfile | head -n1)"
           if [ -z "$current_tag" ]; then
             echo "Unable to determine current pinned OPENCLAW_VERSION from Dockerfile."
             exit 1
           fi
+          current_tag_normalized="${current_tag#v}"
 
           echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "latest_tag_normalized=$latest_tag_normalized" >> "$GITHUB_OUTPUT"
           echo "current_tag=$current_tag" >> "$GITHUB_OUTPUT"
-          if [ "$current_tag" = "$latest_tag" ]; then
-            echo "Already on latest $latest_tag"
+          echo "current_tag_normalized=$current_tag_normalized" >> "$GITHUB_OUTPUT"
+          if [ "$current_tag_normalized" = "$latest_tag_normalized" ]; then
+            echo "Already on latest $latest_tag_normalized"
             echo "has_update=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -54,7 +58,7 @@ jobs:
         if: steps.versions.outputs.has_update == 'true'
         run: |
           set -euo pipefail
-          sed -i.bak -E "s/^ARG OPENCLAW_VERSION=.*/ARG OPENCLAW_VERSION=${{ steps.versions.outputs.latest_tag }}/" Dockerfile
+          sed -i.bak -E "s/^ARG OPENCLAW_VERSION=.*/ARG OPENCLAW_VERSION=${{ steps.versions.outputs.latest_tag_normalized }}/" Dockerfile
           rm -f Dockerfile.bak
 
       - name: Create or update bump PR
@@ -65,13 +69,14 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: chore/bump-openclaw-release
           base: main
-          title: "chore: bump OpenClaw to ${{ steps.versions.outputs.latest_tag }}"
-          commit-message: "chore: bump OpenClaw to ${{ steps.versions.outputs.latest_tag }}"
+          title: "chore: bump OpenClaw to ${{ steps.versions.outputs.latest_tag_normalized }}"
+          commit-message: "chore: bump OpenClaw to ${{ steps.versions.outputs.latest_tag_normalized }}"
           body: |
             Automated OpenClaw version bump.
 
-            - old: `${{ steps.versions.outputs.current_tag }}`
-            - new: `${{ steps.versions.outputs.latest_tag }}`
+            - old: `${{ steps.versions.outputs.current_tag_normalized }}`
+            - new: `${{ steps.versions.outputs.latest_tag_normalized }}`
+            - upstream release tag: `${{ steps.versions.outputs.latest_tag }}`
             - source: scheduled daily workflow
           labels: |
             dependencies
