@@ -1,5 +1,6 @@
 FROM node:22-bookworm
 
+ARG OPENCLAW_VERSION=v2026.2.14
 ARG OPENCLAW_DOCKER_APT_PACKAGES=""
 
 # Install build tools needed by OpenClaw deps and clone source.
@@ -17,10 +18,8 @@ RUN apt-get update && \
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Keep source-of-truth version in repo file and build that exact tag.
-COPY OPENCLAW_VERSION /tmp/OPENCLAW_VERSION
-RUN OPENCLAW_VERSION="$(tr -d '[:space:]' < /tmp/OPENCLAW_VERSION)" && \
-    git clone --depth 1 --branch "$OPENCLAW_VERSION" https://github.com/openclaw/openclaw.git /app && \
+# Keep source-of-truth version pinned in Dockerfile.
+RUN git clone --depth 1 --branch "$OPENCLAW_VERSION" https://github.com/openclaw/openclaw.git /app && \
     echo "$OPENCLAW_VERSION" > /app/OPENCLAW_VERSION
 
 WORKDIR /app
